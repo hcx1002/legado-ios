@@ -592,14 +592,14 @@ private struct SourceDetailView: View {
                 Text("使用你输入的关键词，逐步验证搜索、详情、目录和正文规则。")
                     .font(.footnote).foregroundStyle(.secondary)
             }
-            if current.loginUrl?.isEmpty == false {
+            if current.loginUrl?.isEmpty == false || current.loginUi?.isEmpty == false {
                 Section("账户") {
                     NavigationLink {
                         SourceLoginView(source: current)
                     } label: {
                         Label("登录此书源", systemImage: "person.badge.key.fill")
                     }
-                    Text("登录 Cookie 与阅读请求共享；若书源提供检测脚本，会在页面载入后自动验证。")
+                    Text("支持网页登录与自定义书源表单登录；登录状态与搜索、阅读请求共享。")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
             }

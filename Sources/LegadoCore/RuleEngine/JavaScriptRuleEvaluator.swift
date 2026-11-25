@@ -280,7 +280,7 @@ public struct JavaScriptRuleEvaluator: Sendable {
     }
 
     public init(
-        maximumScriptLength: Int = 64 * 1_024,
+        maximumScriptLength: Int = 512 * 1_024,
         maximumResultLength: Int = 2 * 1_024 * 1_024,
         networkLoader: any JavaScriptNetworkLoading = SynchronousJavaScriptNetworkLoader(),
         urlBuilder: LegadoURLBuilder = .init(),
@@ -461,6 +461,7 @@ public struct JavaScriptRuleEvaluator: Sendable {
         context.setObject(executionContext.page ?? 0, forKeyedSubscript: "page" as NSString)
         installJava(in: context, variables: box, result: result, executionContext: executionContext)
         installCookie(in: context)
+        installCache(in: context)
         installJavaImporterCompatibility(in: context)
         installSource(in: context, source: executionContext.source, variables: box)
         installBook(in: context, book: executionContext.book)
@@ -477,7 +478,8 @@ public struct JavaScriptRuleEvaluator: Sendable {
                 var text = value;
                 if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
                 text = text.trim();
-                if (!text || '[{"-0123456789tfn'.indexOf(text.charAt(0)) < 0) return value;
+                if (!text) return nativeParse(text);
+                if ('[{"-0123456789tfn'.indexOf(text.charAt(0)) < 0) return value;
                 return nativeParse(text);
               };
             })();
@@ -625,6 +627,74 @@ public struct JavaScriptRuleEvaluator: Sendable {
             """)
     }
 
+    private func installCache(in context: JSContext) {
+        let object = JSValue(newObjectIn: context)
+        let put: @convention(block) (String, Any?, Any?) -> Void = { key, value, saveTime in
+            guard !key.isEmpty else { return }
+            let text = Self.stringify(value)
+            let seconds = Self.number(saveTime) ?? 0
+            let deadline: Int64 = seconds > 0
+                ? Int64((Date().timeIntervalSince1970 + seconds) * 1_000)
+                : 0
+            PersistentRuntimeCache.shared.put("jsCache_\(key)", value: text, deadline: deadline)
+        }
+        let get: @convention(block) (String) -> Any? = { key in
+            guard !key.isEmpty else { return nil }
+            return PersistentRuntimeCache.shared.get("jsCache_\(key)")
+        }
+        let delete: @convention(block) (String) -> Void = { key in
+            guard !key.isEmpty else { return }
+            PersistentRuntimeCache.shared.put("jsCache_\(key)", value: "", deadline: 1)
+        }
+        let putMemory: @convention(block) (String, Any?) -> Void = { key, value in
+            guard !key.isEmpty else { return }
+            LegadoMemoryCache.shared.put(key, value: Self.stringify(value))
+        }
+        let getFromMemory: @convention(block) (String) -> Any? = { key in
+            guard !key.isEmpty else { return nil }
+            return LegadoMemoryCache.shared.get(key)
+        }
+        let deleteMemory: @convention(block) (String) -> Void = { key in
+            guard !key.isEmpty else { return }
+            LegadoMemoryCache.shared.delete(key)
+        }
+        object?.setObject(put, forKeyedSubscript: "put" as NSString)
+        object?.setObject(get, forKeyedSubscript: "__get" as NSString)
+        object?.setObject(delete, forKeyedSubscript: "delete" as NSString)
+        object?.setObject(putMemory, forKeyedSubscript: "putMemory" as NSString)
+        object?.setObject(getFromMemory, forKeyedSubscript: "__getFromMemory" as NSString)
+        object?.setObject(deleteMemory, forKeyedSubscript: "deleteMemory" as NSString)
+        context.setObject(object, forKeyedSubscript: "cache" as NSString)
+        context.evaluateScript("""
+            (function () {
+              cache.get = function (key) {
+                var value = cache.__get(String(key));
+                return value == null ? null : value;
+              };
+              cache.getFromMemory = function (key) {
+                var value = cache.__getFromMemory(String(key));
+                return value == null ? null : value;
+              };
+              cache.getInt = function (key) {
+                var value = cache.get(key);
+                return value == null ? null : parseInt(value, 10);
+              };
+              cache.getLong = function (key) {
+                var value = cache.get(key);
+                return value == null ? null : parseInt(value, 10);
+              };
+              cache.getDouble = function (key) {
+                var value = cache.get(key);
+                return value == null ? null : parseFloat(value);
+              };
+              cache.getFloat = function (key) {
+                var value = cache.get(key);
+                return value == null ? null : parseFloat(value);
+              };
+            })();
+            """)
+    }
+
     private func installJavaImporterCompatibility(in context: JSContext) {
         let utf8Bytes: @convention(block) (String) -> [Int] = { value in
             Data(value.utf8).map { Int(Int8(bitPattern: $0)) }
@@ -674,6 +744,11 @@ public struct JavaScriptRuleEvaluator: Sendable {
             return authentication.map { Int(Int8(bitPattern: $0)) }
         }
         let formURLEncode: @convention(block) (String) -> String = { Self.formURLEncode($0) }
+        let threadSleep: @convention(block) (Double) -> Void = { milliseconds in
+            let clamped = min(max(milliseconds, 0), 10_000)
+            guard clamped > 0 else { return }
+            Thread.sleep(forTimeInterval: clamped / 1_000)
+        }
         context.setObject(utf8Bytes, forKeyedSubscript: "__legadoUTF8Bytes" as NSString)
         context.setObject(utf8String, forKeyedSubscript: "__legadoUTF8String" as NSString)
         context.setObject(aesCBC, forKeyedSubscript: "__legadoAESCBC" as NSString)
@@ -682,6 +757,7 @@ public struct JavaScriptRuleEvaluator: Sendable {
         context.setObject(hexEncodeBytes, forKeyedSubscript: "__legadoHexEncodeBytes" as NSString)
         context.setObject(hmacSHA1, forKeyedSubscript: "__legadoHmacSHA1" as NSString)
         context.setObject(formURLEncode, forKeyedSubscript: "__legadoFormURLEncode" as NSString)
+        context.setObject(threadSleep, forKeyedSubscript: "__legadoThreadSleep" as NSString)
         context.evaluateScript(Self.javaImporterBootstrap)
     }
 
@@ -780,6 +856,51 @@ public struct JavaScriptRuleEvaluator: Sendable {
             DiagnosticLog.shared.record(category: "JS", message: String(describing: value ?? "null"))
             return value
         }
+        let toastValue: @convention(block) (Any?) -> Any? = { value in
+            let text = Self.stringify(value)
+            DiagnosticLog.shared.record(category: "JS", message: text)
+            JavaScriptUIBridgeRegistry.shared.bridge()?.showToast(text, long: false)
+            return value
+        }
+        let longToastValue: @convention(block) (Any?) -> Any? = { value in
+            let text = Self.stringify(value)
+            DiagnosticLog.shared.record(category: "JS", message: text)
+            JavaScriptUIBridgeRegistry.shared.bridge()?.showToast(text, long: true)
+            return value
+        }
+        let sourceID = executionContext.source?.bookSourceUrl ?? ""
+        let startBrowserBlock: @convention(block) (Any?, Any?, Bool) -> [String: Any] = { urlValue, titleValue, awaitResult in
+            let rawURL = Self.stringify(urlValue)
+            let title = Self.stringify(titleValue)
+            guard let bridge = JavaScriptUIBridgeRegistry.shared.bridge() else {
+                return [
+                    "url": rawURL,
+                    "body": "",
+                    "code": 0,
+                    "headers": [:]
+                ]
+            }
+            let browserResult = bridge.startBrowser(url: rawURL, title: title, awaitResult: awaitResult, sourceID: sourceID)
+            return [
+                "url": browserResult.url,
+                "body": browserResult.body,
+                "code": browserResult.statusCode,
+                "headers": browserResult.headers
+            ]
+        }
+        let refreshExploreBlock: @convention(block) () -> Void = {
+            JavaScriptUIBridgeRegistry.shared.bridge()?.refreshExplore(sourceID: sourceID)
+        }
+        let symmetricCryptoBlock: @convention(block) (Int, String, Any?, Any?, Any?) -> [Int]? = { operation, transformation, keyValue, ivValue, dataValue in
+            Self.runSymmetricCrypto(
+                operation: operation,
+                transformation: transformation,
+                keyValue: keyValue,
+                ivValue: ivValue,
+                dataValue: dataValue,
+                maximumBytes: self.maximumResultLength
+            )
+        }
         context.setObject(logValue, forKeyedSubscript: "__legadoLog" as NSString)
         context.evaluateScript("var console = { log: function() { __legadoLog(Array.prototype.join.call(arguments, ' ')); }, warn: function() { __legadoLog(Array.prototype.join.call(arguments, ' ')); }, error: function() { __legadoLog(Array.prototype.join.call(arguments, ' ')); } };")
         let urlEncode: @convention(block) (String) -> String = {
@@ -805,6 +926,10 @@ public struct JavaScriptRuleEvaluator: Sendable {
                 )
                 applyState(response.requestVariables, response.rssArticle)
                 return response.decodedText
+            } catch HTTPClientError.statusResponse(let response) {
+                return response.decodedText.isEmpty
+                    ? HTTPClientError.statusResponse(response).localizedDescription
+                    : response.decodedText
             } catch {
                 return error.localizedDescription
             }
@@ -906,14 +1031,19 @@ public struct JavaScriptRuleEvaluator: Sendable {
         java?.setObject(hexDecodeToByteArray, forKeyedSubscript: "hexDecodeToByteArray" as NSString)
         java?.setObject(hexDecodeToString, forKeyedSubscript: "hexDecodeToString" as NSString)
         java?.setObject(hexEncodeToString, forKeyedSubscript: "hexEncodeToString" as NSString)
-        java?.setObject(timeFormatUTC, forKeyedSubscript: "timeFormatUTC" as NSString)
-        java?.setObject(timeFormat, forKeyedSubscript: "timeFormat" as NSString)
+        java?.setObject(timeFormatUTC, forKeyedSubscript: "__timeFormatUTC" as NSString)
+        java?.setObject(timeFormat, forKeyedSubscript: "__timeFormat" as NSString)
         java?.setObject(randomUUID, forKeyedSubscript: "randomUUID" as NSString)
         java?.setObject(deviceID, forKeyedSubscript: "androidId" as NSString)
+        java?.setObject(deviceID, forKeyedSubscript: "deviceID" as NSString)
         java?.setObject(getTag, forKeyedSubscript: "getTag" as NSString)
         java?.setObject(logValue, forKeyedSubscript: "log" as NSString)
         java?.setObject(logValue, forKeyedSubscript: "logType" as NSString)
-        java?.setObject(logValue, forKeyedSubscript: "toast" as NSString)
+        java?.setObject(toastValue, forKeyedSubscript: "toast" as NSString)
+        java?.setObject(longToastValue, forKeyedSubscript: "longToast" as NSString)
+        java?.setObject(startBrowserBlock, forKeyedSubscript: "__startBrowser" as NSString)
+        java?.setObject(refreshExploreBlock, forKeyedSubscript: "refreshExplore" as NSString)
+        java?.setObject(symmetricCryptoBlock, forKeyedSubscript: "__symmetricCrypto" as NSString)
         java?.setObject(urlEncode, forKeyedSubscript: "encodeURI" as NSString)
         java?.setObject(getCookieHeader, forKeyedSubscript: "getCookieHeader" as NSString)
         java?.setObject(getCookieValue, forKeyedSubscript: "__getCookieValue" as NSString)
@@ -1015,6 +1145,63 @@ public struct JavaScriptRuleEvaluator: Sendable {
                 });
               };
               java.clearTtsCache = function () { return true; };
+              function toEpochMilliseconds(value) {
+                if (value instanceof Date) return value.getTime();
+                if (value && typeof value.getTime === 'function') return Number(value.getTime());
+                var n = Number(value);
+                return isNaN(n) ? Date.now() : n;
+              }
+              java.timeFormat = function (value) {
+                return java.__timeFormat(toEpochMilliseconds(value));
+              };
+              java.timeFormatUTC = function (value, format, offset) {
+                return java.__timeFormatUTC(toEpochMilliseconds(value), String(format || ''), Number(offset || 0));
+              };
+              function wrapBrowserResponse(raw) {
+                var bodyText = raw && raw.body != null ? String(raw.body) : '';
+                var urlText = raw && raw.url != null ? String(raw.url) : '';
+                var statusCode = raw && raw.code != null ? Number(raw.code) : 200;
+                var headersMap = (raw && raw.headers) || {};
+                return {
+                  body: function () { return bodyText; },
+                  url: function () { return urlText; },
+                  getUrl: function () { return urlText; },
+                  code: function () { return statusCode; },
+                  statusCode: function () { return statusCode; },
+                  headers: function () { return headersMap; },
+                  toString: function () { return bodyText || urlText; }
+                };
+              }
+              java.startBrowser = function (url, title) {
+                java.__startBrowser(url == null ? '' : String(url), title == null ? '' : String(title), false);
+              };
+              java.startBrowserAwait = function (url, title) {
+                return wrapBrowserResponse(
+                  java.__startBrowser(url == null ? '' : String(url), title == null ? '' : String(title), true)
+                );
+              };
+              java.createSymmetricCrypto = function (transformation, key, iv) {
+                var algo = String(transformation || 'AES');
+                var keyData = key;
+                var ivData = iv == null ? null : iv;
+                return {
+                  encrypt: function (data) {
+                    return java.__symmetricCrypto(1, algo, keyData, ivData, data) || [];
+                  },
+                  decrypt: function (data) {
+                    return java.__symmetricCrypto(2, algo, keyData, ivData, data) || [];
+                  },
+                  encryptBase64: function (data) {
+                    var bytes = java.__symmetricCrypto(1, algo, keyData, ivData, data) || [];
+                    return __legadoBase64EncodeBytes(bytes);
+                  },
+                  decryptStr: function (data) {
+                    var input = typeof data === 'string' ? __legadoBase64DecodeBytes(data) : data;
+                    var bytes = java.__symmetricCrypto(2, algo, keyData, ivData, input) || [];
+                    return __legadoUTF8String(bytes);
+                  }
+                };
+              };
             })();
             """)
     }
@@ -1175,6 +1362,9 @@ public struct JavaScriptRuleEvaluator: Sendable {
             BookSourceRuntimeStore.shared.put(sourceID: sourceID, key: "loginHeader", value: value)
             return value
         }
+        let getLoginInfoRaw: @convention(block) () -> String = {
+            BookSourceRuntimeStore.shared.get(sourceID: sourceID, key: "loginInfo")
+        }
         let getLoginInfo: @convention(block) () -> [String: Any] = {
             let value = BookSourceRuntimeStore.shared.get(sourceID: sourceID, key: "loginInfo")
             guard let data = value.data(using: .utf8),
@@ -1185,6 +1375,19 @@ public struct JavaScriptRuleEvaluator: Sendable {
             let value = Self.stringify($0)
             BookSourceRuntimeStore.shared.put(sourceID: sourceID, key: "loginInfo", value: value)
             return value
+        }
+        let getSourceVariable: @convention(block) () -> String = {
+            let stored = BookSourceRuntimeStore.shared.get(sourceID: sourceID, key: "__sourceVariable")
+            let trimmed = stored.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty || trimmed == "\"\"" || trimmed == "null" { return "" }
+            return stored
+        }
+        let setSourceVariable: @convention(block) (Any?) -> String = {
+            let value = Self.stringify($0)
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            let sanitized = (trimmed == "\"\"" || trimmed == "null") ? "" : value
+            BookSourceRuntimeStore.shared.put(sourceID: sourceID, key: "__sourceVariable", value: sanitized)
+            return sanitized
         }
         let getHeaderMap: @convention(block) (Bool) -> [String: String] = { includeLogin in
             var headers: [String: String] = [:]
@@ -1203,8 +1406,11 @@ public struct JavaScriptRuleEvaluator: Sendable {
         object?.setObject(put, forKeyedSubscript: "put" as NSString)
         object?.setObject(getLoginHeader, forKeyedSubscript: "getLoginHeader" as NSString)
         object?.setObject(putLoginHeader, forKeyedSubscript: "putLoginHeader" as NSString)
+        object?.setObject(getLoginInfoRaw, forKeyedSubscript: "getLoginInfo" as NSString)
         object?.setObject(getLoginInfo, forKeyedSubscript: "__getLoginInfoMap" as NSString)
         object?.setObject(putLoginInfo, forKeyedSubscript: "putLoginInfo" as NSString)
+        object?.setObject(getSourceVariable, forKeyedSubscript: "getVariable" as NSString)
+        object?.setObject(setSourceVariable, forKeyedSubscript: "setVariable" as NSString)
         object?.setObject(getHeaderMap, forKeyedSubscript: "getHeaderMap" as NSString)
         object?.setObject(source?.bookSourceName ?? "", forKeyedSubscript: "bookSourceName" as NSString)
         object?.setObject(source?.bookSourceUrl ?? "", forKeyedSubscript: "bookSourceUrl" as NSString)
@@ -1216,6 +1422,9 @@ public struct JavaScriptRuleEvaluator: Sendable {
         object?.setObject(source?.enabledExplore ?? false, forKeyedSubscript: "enabledExplore" as NSString)
         object?.setObject(source?.header ?? "", forKeyedSubscript: "header" as NSString)
         object?.setObject(source?.loginUrl ?? "", forKeyedSubscript: "loginUrl" as NSString)
+        object?.setObject(source?.loginUi ?? "", forKeyedSubscript: "loginUi" as NSString)
+        object?.setObject(source?.bookSourceComment ?? "", forKeyedSubscript: "bookSourceComment" as NSString)
+        object?.setObject(source?.variableComment ?? "", forKeyedSubscript: "variableComment" as NSString)
         object?.setObject(source?.searchUrl ?? "", forKeyedSubscript: "searchUrl" as NSString)
         object?.setObject(source?.exploreUrl ?? "", forKeyedSubscript: "exploreUrl" as NSString)
         object?.setObject(source?.respondTime ?? 0, forKeyedSubscript: "respondTime" as NSString)
@@ -1243,16 +1452,57 @@ public struct JavaScriptRuleEvaluator: Sendable {
 
     private func installBook(in context: JSContext, book: Book?) {
         let object = JSValue(newObjectIn: context)
+        let bookStoreID = book.map { "__book__\($0.bookUrl)" } ?? ""
+        let initialVariable = book?.variable ?? ""
+        let loadVariables: () -> [String: String] = {
+            var map: [String: String] = [:]
+            if !initialVariable.isEmpty,
+               let data = initialVariable.data(using: .utf8),
+               let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                for (k, v) in parsed { map[k] = Self.stringify(v) }
+            }
+            if !bookStoreID.isEmpty {
+                let stored = BookSourceRuntimeStore.shared.get(sourceID: bookStoreID, key: "__bookVariable")
+                if !stored.isEmpty,
+                   let data = stored.data(using: .utf8),
+                   let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    for (k, v) in parsed { map[k] = Self.stringify(v) }
+                }
+            }
+            return map
+        }
         let getName: @convention(block) () -> String = { book?.name ?? "" }
         let getAuthor: @convention(block) () -> String = { book?.author ?? "" }
         let getBookURL: @convention(block) () -> String = { book?.bookUrl ?? "" }
         let getCoverURL: @convention(block) () -> String = { book?.coverUrl ?? "" }
         let getTotal: @convention(block) () -> Int = { book?.totalChapterNum ?? 0 }
+        let getBookVariables: @convention(block) () -> [String: String] = { loadVariables() }
+        let putBookVariable: @convention(block) (String, Any?) -> Bool = { key, value in
+            guard !bookStoreID.isEmpty else { return false }
+            var map = loadVariables()
+            if value == nil || value is NSNull {
+                map.removeValue(forKey: key)
+            } else {
+                map[key] = Self.stringify(value)
+            }
+            if let data = try? JSONEncoder().encode(map) {
+                BookSourceRuntimeStore.shared.put(sourceID: bookStoreID, key: "__bookVariable", value: String(decoding: data, as: UTF8.self))
+            }
+            return true
+        }
+        let replaceBookVariables: @convention(block) (Any?) -> Void = { raw in
+            guard !bookStoreID.isEmpty else { return }
+            let text = Self.stringify(raw)
+            BookSourceRuntimeStore.shared.put(sourceID: bookStoreID, key: "__bookVariable", value: text)
+        }
         object?.setObject(getName, forKeyedSubscript: "getName" as NSString)
         object?.setObject(getAuthor, forKeyedSubscript: "getAuthor" as NSString)
         object?.setObject(getBookURL, forKeyedSubscript: "getBookUrl" as NSString)
         object?.setObject(getCoverURL, forKeyedSubscript: "getCoverUrl" as NSString)
         object?.setObject(getTotal, forKeyedSubscript: "getTotalChapterNum" as NSString)
+        object?.setObject(getBookVariables, forKeyedSubscript: "__variables" as NSString)
+        object?.setObject(putBookVariable, forKeyedSubscript: "putVariable" as NSString)
+        object?.setObject(replaceBookVariables, forKeyedSubscript: "__replaceVariables" as NSString)
         object?.setObject(book?.name ?? "", forKeyedSubscript: "name" as NSString)
         object?.setObject(book?.author ?? "", forKeyedSubscript: "author" as NSString)
         object?.setObject(book?.bookUrl ?? "", forKeyedSubscript: "bookUrl" as NSString)
@@ -1264,6 +1514,7 @@ public struct JavaScriptRuleEvaluator: Sendable {
         object?.setObject(book?.intro ?? "", forKeyedSubscript: "intro" as NSString)
         object?.setObject(book?.type ?? 0, forKeyedSubscript: "type" as NSString)
         object?.setObject(book?.group ?? 0, forKeyedSubscript: "group" as NSString)
+        object?.setObject(book?.order ?? 0, forKeyedSubscript: "order" as NSString)
         object?.setObject(book?.latestChapterTitle ?? "", forKeyedSubscript: "latestChapterTitle" as NSString)
         object?.setObject(book?.totalChapterNum ?? 0, forKeyedSubscript: "totalChapterNum" as NSString)
         object?.setObject(book?.durChapterIndex ?? 0, forKeyedSubscript: "durChapterIndex" as NSString)
@@ -1271,7 +1522,28 @@ public struct JavaScriptRuleEvaluator: Sendable {
         object?.setObject(book?.durChapterPos ?? 0, forKeyedSubscript: "durChapterPos" as NSString)
         object?.setObject(book?.wordCount ?? "", forKeyedSubscript: "wordCount" as NSString)
         object?.setObject(book?.variable ?? "", forKeyedSubscript: "variable" as NSString)
+        object?.setObject("", forKeyedSubscript: "imageStyle" as NSString)
         context.setObject(object, forKeyedSubscript: "book" as NSString)
+        context.evaluateScript("""
+            (function (current) {
+              current.getVariable = function (key) {
+                var values = current.__variables() || {};
+                if (!arguments.length || key == null) return JSON.stringify(values);
+                var k = String(key);
+                return Object.prototype.hasOwnProperty.call(values, k) ? values[k] : '';
+              };
+              current.setVariable = function (value) {
+                current.__replaceVariables(value == null ? '' : String(value));
+                current.variable = value == null ? '' : String(value);
+              };
+              current.getVariableMap = function () { return current.__variables() || {}; };
+              current.readConfig = { useReplaceRule: true };
+              current.setUseReplaceRule = function (flag) {
+                if (!current.readConfig) current.readConfig = {};
+                current.readConfig.useReplaceRule = Boolean(flag);
+              };
+            })(book);
+            """)
     }
 
     private func installUpdatableBook(
@@ -1591,7 +1863,7 @@ public struct JavaScriptRuleEvaluator: Sendable {
 
     private func rejectUnboundedExecution(_ script: String) throws {
         let compact = script.replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression).lowercased()
-        let rejected = ["while(true)", "while(1)", "for(;;)", "eval(", "functionconstructor("]
+        let rejected = ["while(true)", "while(1)", "for(;;)", "functionconstructor("]
         if let token = rejected.first(where: compact.contains) {
             throw RuleEngineError.resourceLimit(rule: script, detail: "JavaScript 包含未受控执行结构：\(token)")
         }
@@ -1625,6 +1897,9 @@ public struct JavaScriptRuleEvaluator: Sendable {
     }
 
     private static func byteData(from value: Any?) -> Data {
+        if let string = value as? String {
+            return Data(string.utf8)
+        }
         let values: [Any]
         if let value = value as? [Any] {
             values = value
@@ -1638,6 +1913,74 @@ public struct JavaScriptRuleEvaluator: Sendable {
             if let number = Int(stringify(item)) { return UInt8(truncatingIfNeeded: number) }
             return nil
         })
+    }
+
+    private static func runSymmetricCrypto(
+        operation: Int,
+        transformation: String,
+        keyValue: Any?,
+        ivValue: Any?,
+        dataValue: Any?,
+        maximumBytes: Int
+    ) -> [Int]? {
+        guard [1, 2].contains(operation) else { return nil }
+        let input = byteData(from: dataValue)
+        guard input.count <= maximumBytes else { return nil }
+        var key = byteData(from: keyValue)
+        guard !key.isEmpty else { return nil }
+        if key.count < 16 {
+            key.append(Data(repeating: 0, count: 16 - key.count))
+        } else if key.count > 16 && key.count < 24 {
+            key.append(Data(repeating: 0, count: 24 - key.count))
+        } else if key.count > 24 && key.count < 32 {
+            key.append(Data(repeating: 0, count: 32 - key.count))
+        } else if key.count > 32 {
+            key = Data(key.prefix(32))
+        }
+        let upper = transformation.uppercased()
+        let isCBC = upper.contains("/CBC/")
+        var options = CCOptions(kCCOptionPKCS7Padding)
+        if !isCBC { options |= CCOptions(kCCOptionECBMode) }
+        var iv = isCBC ? byteData(from: ivValue) : Data()
+        if isCBC {
+            if iv.count < kCCBlockSizeAES128 {
+                iv.append(Data(repeating: 0, count: kCCBlockSizeAES128 - iv.count))
+            } else if iv.count > kCCBlockSizeAES128 {
+                iv = Data(iv.prefix(kCCBlockSizeAES128))
+            }
+        }
+        var output = [UInt8](repeating: 0, count: input.count + kCCBlockSizeAES128)
+        let capacity = output.count
+        var written = 0
+        let status: CCCryptorStatus = key.withUnsafeBytes { keyBytes in
+            input.withUnsafeBytes { inputBytes in
+                if isCBC {
+                    return iv.withUnsafeBytes { ivBytes in
+                        CCCrypt(
+                            operation == 1 ? CCOperation(kCCEncrypt) : CCOperation(kCCDecrypt),
+                            CCAlgorithm(kCCAlgorithmAES),
+                            options,
+                            keyBytes.baseAddress, key.count,
+                            ivBytes.baseAddress,
+                            inputBytes.baseAddress, input.count,
+                            &output, capacity, &written
+                        )
+                    }
+                } else {
+                    return CCCrypt(
+                        operation == 1 ? CCOperation(kCCEncrypt) : CCOperation(kCCDecrypt),
+                        CCAlgorithm(kCCAlgorithmAES),
+                        options,
+                        keyBytes.baseAddress, key.count,
+                        nil,
+                        inputBytes.baseAddress, input.count,
+                        &output, capacity, &written
+                    )
+                }
+            }
+        }
+        guard status == kCCSuccess else { return nil }
+        return output.prefix(written).map { Int(Int8(bitPattern: $0)) }
     }
 
     private static let javaImporterBootstrap = #"""
@@ -1732,10 +2075,16 @@ public struct JavaScriptRuleEvaluator: Sendable {
           var Base64 = javaClass('Base64', {
             DEFAULT: 0,
             NO_WRAP: 2,
-            encodeToString: function (bytes) { return __legadoBase64EncodeBytes(checkedBytes(bytes)); },
+            encodeToString: function (bytes) {
+              if (typeof bytes === 'string') return __legadoBase64EncodeBytes(__legadoUTF8Bytes(bytes));
+              return __legadoBase64EncodeBytes(checkedBytes(bytes));
+            },
             decode: function (value) { return __legadoBase64DecodeBytes(NativeString(value)); },
             getDecoder: function () { return Object.freeze({ decode: this.decode }); },
             getEncoder: function () { return Object.freeze({ encodeToString: this.encodeToString }); }
+          });
+          var JavaThread = javaClass('Thread', {
+            sleep: function (milliseconds) { __legadoThreadSleep(Number(milliseconds) || 0); }
           });
           var Arrays = javaClass('Arrays', {
             copyOfRange: function (bytes, from, to) {
@@ -1766,7 +2115,7 @@ public struct JavaScriptRuleEvaluator: Sendable {
               crypto: { Mac: Mac, Cipher: Cipher, spec: { SecretKeySpec: SecretKeySpec, IvParameterSpec: IvParameterSpec } },
               xml: { bind: { DatatypeConverter: DatatypeConverter } }
             },
-            java: { net: { URLEncoder: URLEncoder }, lang: { String: JavaString }, util: { Base64: Base64, Arrays: Arrays } },
+            java: { net: { URLEncoder: URLEncoder }, lang: { String: JavaString, Thread: JavaThread }, util: { Base64: Base64, Arrays: Arrays } },
             android: { util: { Base64: Base64 } }
           };
           Object.freeze(packages.javax.crypto.spec);
@@ -1921,5 +2270,71 @@ public final class BookSourceRuntimeStore: @unchecked Sendable {
 
     private func persistentKey(sourceID: String, key: String) -> String {
         key == "loginHeader" ? "loginHeader_\(sourceID)" : "v_\(sourceID)_\(key)"
+    }
+}
+
+public struct JavaScriptBrowserResult: Sendable {
+    public var url: String
+    public var body: String
+    public var statusCode: Int
+    public var headers: [String: String]
+
+    public init(url: String = "", body: String = "", statusCode: Int = 200, headers: [String: String] = [:]) {
+        self.url = url
+        self.body = body
+        self.statusCode = statusCode
+        self.headers = headers
+    }
+}
+
+public protocol JavaScriptUIBridging: Sendable {
+    func showToast(_ message: String, long: Bool)
+    func startBrowser(url: String, title: String, awaitResult: Bool, sourceID: String) -> JavaScriptBrowserResult
+    func refreshExplore(sourceID: String)
+}
+
+public final class JavaScriptUIBridgeRegistry: @unchecked Sendable {
+    public static let shared = JavaScriptUIBridgeRegistry()
+
+    private let lock = NSLock()
+    private var storedBridge: (any JavaScriptUIBridging)?
+
+    public init() {}
+
+    public func register(_ bridge: any JavaScriptUIBridging) {
+        lock.lock()
+        storedBridge = bridge
+        lock.unlock()
+    }
+
+    public func bridge() -> (any JavaScriptUIBridging)? {
+        lock.lock()
+        let value = storedBridge
+        lock.unlock()
+        return value
+    }
+}
+
+public final class LegadoMemoryCache: @unchecked Sendable {
+    public static let shared = LegadoMemoryCache()
+    private let lock = NSLock()
+    private var values: [String: String] = [:]
+
+    public func get(_ key: String) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return values[key]
+    }
+
+    public func put(_ key: String, value: String) {
+        lock.lock()
+        values[key] = value
+        lock.unlock()
+    }
+
+    public func delete(_ key: String) {
+        lock.lock()
+        values.removeValue(forKey: key)
+        lock.unlock()
     }
 }

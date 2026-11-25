@@ -119,6 +119,8 @@ struct ReaderView: View {
     @AppStorage("readerUseBackgroundImage") private var useBackgroundImage = false
     @AppStorage("themeMode") private var themeMode = "0"
     @AppStorage("enableReadRecord") private var enableReadRecord = true
+    @AppStorage("volumeKeyPage") private var volumeKeyPage = false
+    @State private var volumePageTurnRequest: ReaderPageTurnRequest?
     @State private var pageAnimation: Int
     @AppStorage("screenOrientation") private var screenOrientation = "0"
     @AppStorage("clickActionTopLeft") private var clickActionTL = 2
@@ -344,6 +346,21 @@ struct ReaderView: View {
         }
         .background { readerLoadingTasks }
         .background { readerObservers }
+        .background {
+            ReaderVolumeKeyMonitor(
+                isEnabled: volumeKeyPage
+                    && !speech.isSpeaking
+                    && activeSheet == nil
+                    && !showsTableOfContents
+                    && chapterCommentsTarget == nil
+                    && sourceSwitchBook == nil
+                    && !model.hasImageContent
+            ) { direction in
+                if showsReaderMenu { showsReaderMenu = false }
+                guard !waitingForChapter else { return }
+                volumePageTurnRequest = ReaderPageTurnRequest(direction: direction)
+            }
+        }
     }
 
     private var readerLoadingTasks: some View {
@@ -449,7 +466,8 @@ struct ReaderView: View {
         .onChange(of: screenOrientation) { value in
             ReaderScreenOrientation.apply(value)
         }
-        .onChange(of: themeMode) { _ in
+        .onChange(of: themeMode) { value in
+            guard value == "3" else { return }
             isAutoReading = false
             readerJumpPosition = nil
             currentPage = 1
@@ -717,14 +735,17 @@ struct ReaderView: View {
                 }
                 if model.canGoNext {
                     showsReaderMenu = false
-                    readerPosition = boundaryPosition
-                    saveProgress(immediate: true)
+                    saveProgress(immediate: true, position: boundaryPosition)
                     readerJumpPosition = nil
                     // Keep every chapter in its own TextKit document. Appending
                     // text here makes the absolute UTF-16 offset belong to the
                     // previous chapter while progress is saved under the next.
                     model.goNext()
                     readerPosition = model.requestedPosition
+                    DiagnosticLog.shared.record(
+                        category: "翻页",
+                        message: "末页进入下一章：index=\(model.currentIndex) requested=\(model.requestedPosition) loaded=\(model.hasLoadedCurrentChapter) anim=\(pageAnimation)"
+                    )
                 } else {
                     isAutoReading = false
                 }
@@ -736,11 +757,14 @@ struct ReaderView: View {
                 }
                 guard model.canGoPrevious else { return }
                 showsReaderMenu = false
-                readerPosition = boundaryPosition
-                saveProgress(immediate: true)
+                saveProgress(immediate: true, position: boundaryPosition)
                 readerJumpPosition = nil
                 model.goPrevious(position: Int.max)
                 if model.hasLoadedCurrentChapter { readerPosition = max(0, model.content.utf16.count - 1) }
+                DiagnosticLog.shared.record(
+                    category: "翻页",
+                    message: "首页返回上一章：index=\(model.currentIndex) requested=\(model.requestedPosition) loaded=\(model.hasLoadedCurrentChapter) anim=\(pageAnimation)"
+                )
             },
             onEnteredPrevious: { position in
                 guard pageAnimation == 3, model.canGoPrevious, model.hasPreviousWindow else { return }
@@ -761,7 +785,8 @@ struct ReaderView: View {
             onPageChanged: pageDidChange,
             onTapAction: handleTapAction,
             holdsDisplayedPage: waitingForChapter,
-            chapterGeneration: model.displayedChapterGeneration
+            chapterGeneration: model.displayedChapterGeneration,
+            pageTurnRequest: volumePageTurnRequest
         )
     }
 
@@ -1104,12 +1129,21 @@ struct ReaderView: View {
         )
     }
 
+    private func selectReaderTheme(_ id: String) {
+        let resolved = ReaderStylePreset.resolve(id)
+        if resolved.id == "night", resolvedStyle.id != "night", resolvedStyle.id != "eink" {
+            previousDayTheme = resolvedStyle.id
+        }
+        theme = resolved.id
+        themeMode = ReaderStylePreset.appThemeMode(for: resolved.id)
+    }
+
     private func toggleNightTheme() {
         if resolvedStyle.id == "night" {
-            theme = previousDayTheme == "night" ? "wechat" : previousDayTheme
+            selectReaderTheme(previousDayTheme == "night" ? "wechat" : previousDayTheme)
         } else {
             previousDayTheme = resolvedStyle.id
-            theme = "night"
+            selectReaderTheme("night")
         }
     }
 
@@ -1281,7 +1315,7 @@ struct ReaderView: View {
                                 let isSelected = resolvedStyle.id == preset.id && activeBackgroundImage == nil
                                 Button {
                                     useBackgroundImage = false
-                                    theme = preset.id
+                                    selectReaderTheme(preset.id)
                                 } label: {
                                     VStack(spacing: 6) {
                                         RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -1713,6 +1747,14 @@ struct ReaderView: View {
                     }
                 }
 
+                Section {
+                    Toggle("音量键翻页", isOn: $volumeKeyPage)
+                } header: {
+                    Text("翻页")
+                } footer: {
+                    Text("按音量减下一页，按音量加上一页；语音朗读时自动恢复系统音量调节。")
+                }
+
                 Section("屏幕") {
                     Picker("屏幕方向", selection: $screenOrientation) {
                         Text("跟随系统").tag("0")
@@ -1998,9 +2040,9 @@ struct ReaderView: View {
         }
     }
 
-    private func saveProgress(immediate: Bool = false) {
+    private func saveProgress(immediate: Bool = false, position explicitPosition: Int? = nil) {
         guard model.hasLoadedCurrentChapter, let chapter = model.currentChapter else { return }
-        let position = readerPosition
+        let position = explicitPosition ?? readerPosition
         let currentBook = book
         progressSaveGeneration &+= 1
         progressSaveTask?.cancel()

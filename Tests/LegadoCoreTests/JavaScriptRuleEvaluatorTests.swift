@@ -241,6 +241,16 @@ struct JavaScriptRuleEvaluatorTests {
                 executionContext: .init()
             )
         }
+        let fallback = try evaluator.evaluate(
+            script: """
+                var cfg;
+                try { cfg = JSON.parse(''); } catch (e) { cfg = { server: 'https://v5.langge.uk' }; }
+                cfg.server;
+                """,
+            result: .null,
+            executionContext: .init()
+        )
+        #expect(fallback.value.stringValue == "https://v5.langge.uk")
     }
 
     @Test func directJavaGetResolvesRelativeURLAndAppliesSourceHeaders() throws {
@@ -504,6 +514,97 @@ struct JavaScriptRuleEvaluatorTests {
         #expect(result.values.isEmpty)
         #expect(result.diagnostics.contains { $0.code == "rule.resource_limit" })
     }
+
+    @Test func supportsCustomLoginAndBookSourceCompatibilityAPIs() throws {
+        let mockBridge = MockJavaScriptUIBridge()
+        JavaScriptUIBridgeRegistry.shared.register(mockBridge)
+
+        var source = BookSource(bookSourceUrl: "custom-login-compat-test", bookSourceName: "兼容测试源")
+        source.loginUi = #"[{"name":"邮箱","type":"text"}]"#
+        source.jsLib = "function helperEval() { return eval('1 + 2'); }"
+        var book = Book(bookUrl: "data:;base64,e30=", name: "测试书", author: "作者", origin: source.bookSourceUrl)
+        book.variable = #"{"custom":"voice-4"}"#
+
+        let script = """
+            source.setVariable(JSON.stringify({ server: 'https://example.test', tab: '小说' }));
+            source.putLoginInfo(JSON.stringify({ '邮箱': 'u@example.test' }));
+            cache.put('k1', 'v1', 60);
+            cache.putMemory('m1', 'mv1');
+            cookie.setCookie('https://example.test', 'qttoken=tok123;deviceId=dev456');
+            book.setUseReplaceRule(false);
+            var enc = Packages.android.util.Base64.encodeToString(
+                java.createSymmetricCrypto('AES', java.androidId()).encrypt('hello'),
+                2
+            );
+            var dec = java.createSymmetricCrypto('AES', java.androidId()).decryptStr(enc);
+            java.longToast('登录完成');
+            var browser = java.startBrowserAwait('https://example.test/settings', '设置');
+            var formatted = java.timeFormat(new Date(1700000000000));
+            JSON.stringify({
+                evalVal: helperEval(),
+                sourceVar: JSON.parse(source.getVariable()).server,
+                loginRaw: JSON.parse(source.getLoginInfo())['邮箱'],
+                hasLoginUi: typeof source.loginUi === 'string' && source.loginUi.length > 0,
+                cacheDisk: cache.get('k1'),
+                cacheMem: cache.getFromMemory('m1'),
+                qt: cookie.getKey('https://example.test', 'qttoken'),
+                dev: cookie.getKey('https://example.test', 'deviceId'),
+                deviceEq: java.deviceID() === java.androidId(),
+                bookVar: book.getVariable('custom'),
+                replaceRule: book.readConfig.useReplaceRule,
+                cryptoRoundTrip: dec,
+                browserBody: browser.body(),
+                browserUrl: browser.url(),
+                hasTime: formatted.length > 0
+            });
+            """
+
+        let evaluated = try JavaScriptRuleEvaluator().evaluate(
+            script: script,
+            result: .null,
+            executionContext: .init(source: source, book: book)
+        )
+        let payload = try #require(JSONSerialization.jsonObject(with: Data(evaluated.value.stringValue.utf8)) as? [String: Any])
+        #expect(payload["evalVal"] as? Int == 3)
+        #expect(payload["sourceVar"] as? String == "https://example.test")
+        #expect(payload["loginRaw"] as? String == "u@example.test")
+        #expect(payload["hasLoginUi"] as? Bool == true)
+        #expect(payload["cacheDisk"] as? String == "v1")
+        #expect(payload["cacheMem"] as? String == "mv1")
+        #expect(payload["qt"] as? String == "tok123")
+        #expect(payload["dev"] as? String == "dev456")
+        #expect(payload["deviceEq"] as? Bool == true)
+        #expect(payload["bookVar"] as? String == "voice-4")
+        #expect(payload["replaceRule"] as? Bool == false)
+        #expect(payload["cryptoRoundTrip"] as? String == "hello")
+        #expect(payload["browserBody"] as? String == "<html>ok</html>")
+        #expect(payload["browserUrl"] as? String == "https://example.test/settings")
+        #expect(payload["hasTime"] as? Bool == true)
+        #expect(mockBridge.lastToast == "登录完成")
+    }
+}
+
+private final class MockJavaScriptUIBridge: JavaScriptUIBridging, @unchecked Sendable {
+    private let lock = NSLock()
+    private var toastStorage: String?
+
+    var lastToast: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return toastStorage
+    }
+
+    func showToast(_ message: String, long: Bool) {
+        lock.lock()
+        toastStorage = message
+        lock.unlock()
+    }
+
+    func startBrowser(url: String, title: String, awaitResult: Bool, sourceID: String) -> JavaScriptBrowserResult {
+        JavaScriptBrowserResult(url: url, body: "<html>ok</html>", statusCode: 200, headers: [:])
+    }
+
+    func refreshExplore(sourceID: String) {}
 }
 
 private struct InactiveWebScriptNetworkMock: JavaScriptNetworkLoading {

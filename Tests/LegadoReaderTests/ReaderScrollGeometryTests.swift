@@ -125,6 +125,273 @@ final class ReaderPagingGeometryTests: XCTestCase {
         XCTAssertTrue(mask.intersection(view.bounds).contains(heading))
     }
 
+    func testAdvancingFromLongerChapterLastPageToShorterChapterStartsAtFirstPage() async throws {
+        let longText = String(repeating: "这是第四十五章的测试正文内容，用于验证长章节翻到最后一页后进入较短下一章时的分页与滚动位置。\n", count: 95)
+        let shortText = String(repeating: "这是第四十六章的较短正文内容，翻入本章后必须停留在第一页开头，而不是最后一页结尾。\n", count: 42)
+        final class HarnessModel: ObservableObject {
+            @Published var text: String
+            @Published var title: String
+            @Published var holdsDisplayedPage = false
+            @Published var chapterGeneration = 1
+            @Published var requestedPosition = 0
+            @Published var readerPosition = 0
+            @Published var currentPage = 1
+            @Published var totalPages = 1
+            @Published var pageRanges: [NSRange] = []
+
+            init(text: String, title: String) {
+                self.text = text
+                self.title = title
+            }
+        }
+        struct HarnessView: View {
+            @ObservedObject var model: HarnessModel
+            let animation: Int
+            let onReachedEnd: (Int) -> Void
+
+            var body: some View {
+                ReaderTextView(
+                    text: model.text, title: model.title,
+                    previousTitle: nil, previousText: "", isPreviousReady: false,
+                    continuationTitle: nil, continuationText: "", isContinuationReady: false, isVolume: false,
+                    fontSize: 24, fontPath: "", letterSpacing: 0.1, lineSpacing: 12, paragraphSpacing: 4,
+                    paragraphIndent: "　　", paddingLeft: 16, paddingRight: 16, paddingTop: 6, paddingBottom: 6,
+                    headerInset: 0, footerInset: 0, fontWeight: 0, titleMode: 0, titleSize: 4,
+                    titleTopSpacing: 16, titleBottomSpacing: 24, underlineMode: 0, isSelectable: false,
+                    fullJustify: true, pageAnimation: animation, isEInkMode: false, clickActions: Array(repeating: 0, count: 9),
+                    backgroundColor: .white, foregroundColor: .black,
+                    requestedPosition: model.requestedPosition, jumpPosition: nil, renderRevision: 0,
+                    readerPosition: $model.readerPosition, pageRanges: $model.pageRanges,
+                    currentPage: $model.currentPage, totalPages: $model.totalPages,
+                    isAutoReading: false, isAutoReadPaused: false, isLoadingNextChapter: false, secondsPerScreen: 10,
+                    onReachedEnd: onReachedEnd, onReachedStart: { _ in }, onEnteredPrevious: { _ in },
+                    onEnteredContinuation: { _ in }, onDeferredRender: {}, onCancelNextLoading: {},
+                    onPageChanged: {}, onTapAction: { _ in },
+                    holdsDisplayedPage: model.holdsDisplayedPage,
+                    chapterGeneration: model.chapterGeneration
+                )
+            }
+        }
+
+        for animation in [4, 0] {
+            for asyncLoad in [false, true] {
+                let model = HarnessModel(text: longText, title: "第45章 长章节")
+                let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 430, height: 850))
+                let host = UIHostingController(rootView: HarnessView(model: model, animation: animation) { boundary in
+                    model.readerPosition = boundary
+                    if asyncLoad {
+                        model.holdsDisplayedPage = true
+                        model.requestedPosition = 0
+                        model.readerPosition = 0
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                            model.title = "第46章 短章节"
+                            model.text = shortText
+                            model.chapterGeneration += 1
+                            model.holdsDisplayedPage = false
+                        }
+                    } else {
+                        model.title = "第46章 短章节"
+                        model.text = shortText
+                        model.requestedPosition = 0
+                        model.readerPosition = 0
+                        model.chapterGeneration += 1
+                    }
+                })
+                window.rootViewController = host
+                window.makeKeyAndVisible()
+                host.view.layoutIfNeeded()
+                defer { window.isHidden = true }
+                try await Task.sleep(nanoseconds: 100_000_000)
+
+                let view = try XCTUnwrap(findTextView(host.view))
+                let coordinator = try XCTUnwrap(view.delegate as? ReaderTextView.Coordinator)
+                defer { coordinator.invalidate() }
+
+                let ch45Pages = ReaderTextPage.layout(in: view, height: view.bounds.height - 12)
+                XCTAssertGreaterThan(ch45Pages.count, 8)
+                // Jump straight to the last page of Ch 45 just like flipping to 13/13.
+                view.setContentOffset(CGPoint(x: 0, y: ch45Pages.last!.offset), animated: false)
+                try await Task.sleep(nanoseconds: 50_000_000)
+                XCTAssertEqual(model.currentPage, ch45Pages.count)
+
+                // Turn past the last page of Ch 45 -> should land on Ch 46 page 1/N.
+                coordinator.turnPage(1)
+                try await Task.sleep(nanoseconds: 250_000_000)
+
+                let ch46Pages = ReaderTextPage.layout(in: view, height: view.bounds.height - 12)
+                XCTAssertLessThan(ch46Pages.count, ch45Pages.count)
+                XCTAssertTrue(view.text.hasPrefix("第46章"), "Expected chapter 46 text")
+                XCTAssertEqual(
+                    view.contentOffset.y, 0, accuracy: 0.5,
+                    "anim=\(animation) async=\(asyncLoad) offset=\(view.contentOffset.y) selected=\(view.selectedRange) page=\(model.currentPage)/\(model.totalPages) readerPos=\(model.readerPosition)"
+                )
+                XCTAssertEqual(
+                    model.currentPage, 1,
+                    "anim=\(animation) async=\(asyncLoad) offset=\(view.contentOffset.y) page=\(model.currentPage)/\(model.totalPages) readerPos=\(model.readerPosition)"
+                )
+                XCTAssertEqual(model.totalPages, ch46Pages.count)
+            }
+        }
+    }
+
+    func testRealReaderViewAdvancingFromLongerToShorterChapterStartsAtPageOne() async throws {
+        struct MockChapterLoader: ChapterContentLoading {
+            let contents: [String: String]
+            let delayNanoseconds: UInt64
+            func loadContent(book: Book, chapter: BookChapter, source: BookSource, nextChapterURL: String?, maxPages: Int) async -> ChapterContentReport {
+                if delayNanoseconds > 0 { try? await Task.sleep(nanoseconds: delayNanoseconds) }
+                return ChapterContentReport(title: chapter.title, content: contents[chapter.url] ?? "")
+            }
+        }
+
+        let longText = String(repeating: "这是第四十五章的长正文内容，包含很多段落，翻页十三页才能读完这一整章。\n", count: 95)
+        let shortText = String(repeating: "这是第四十六章的较短正文内容，只有七页左右，翻入本章后必须显示第一页开头。\n", count: 42)
+        let source = BookSource(bookSourceUrl: "https://paging-test.invalid", bookSourceName: "分页测试源")
+        let book = Book(bookUrl: "https://paging-test.invalid/book/1", name: "分页测试书", author: "作者", origin: source.id)
+        let chapters = [
+            BookChapter(url: "https://paging-test.invalid/ch/45", title: "第45章 长章", bookUrl: book.bookUrl, index: 0),
+            BookChapter(url: "https://paging-test.invalid/ch/46", title: "第46章 短章", bookUrl: book.bookUrl, index: 1)
+        ]
+
+        let savedPageAnim = UserDefaults.standard.object(forKey: "pageAnim")
+        defer {
+            if let savedPageAnim { UserDefaults.standard.set(savedPageAnim, forKey: "pageAnim") }
+            else { UserDefaults.standard.removeObject(forKey: "pageAnim") }
+        }
+
+        for animation in [4, 2] {
+            for forceUncached in [false, true] {
+                UserDefaults.standard.set(animation, forKey: "pageAnim")
+                let cacheDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                defer { try? FileManager.default.removeItem(at: cacheDir) }
+                let loader = MockChapterLoader(
+                    contents: [chapters[0].url: longText, chapters[1].url: shortText],
+                    delayNanoseconds: forceUncached ? 180_000_000 : 0
+                )
+                let vm = ReaderViewModel(
+                    book: book, chapters: chapters, initialIndex: 0, source: source,
+                    service: loader, cache: ChapterContentCache(directory: cacheDir)
+                )
+                let library = BookLibraryModel.demo(books: [book])
+                let sourceLibrary = SourceLibraryModel.demo(sources: [source])
+                let replaceRules = ReplaceRuleLibraryModel.demo()
+                let activity = ReadingActivityModel.demo(bookmarks: [], records: [])
+                let root = ReadingNavigationStack {
+                    ReaderView(prepared: vm)
+                }
+                .environmentObject(library)
+                .environmentObject(sourceLibrary)
+                .environmentObject(replaceRules)
+                .environmentObject(activity)
+
+                let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 430, height: 932))
+                let host = UIHostingController(rootView: root)
+                window.rootViewController = host
+                window.makeKeyAndVisible()
+                host.view.layoutIfNeeded()
+                defer { window.isHidden = true }
+
+                for _ in 0..<40 {
+                    if vm.hasLoadedCurrentChapter, !vm.content.isEmpty { break }
+                    try await Task.sleep(nanoseconds: 50_000_000)
+                }
+                if forceUncached { vm.cancelPreload() }
+                try await Task.sleep(nanoseconds: 100_000_000)
+
+                let view = try XCTUnwrap(findTextView(host.view))
+                let coordinator = try XCTUnwrap(view.delegate as? ReaderTextView.Coordinator)
+                defer { coordinator.invalidate() }
+
+                let ch45Pages = ReaderTextPage.layout(in: view, height: view.bounds.height - view.textContainerInset.top - view.textContainerInset.bottom)
+                XCTAssertGreaterThan(ch45Pages.count, 8)
+
+                // Jump to last page and verify via turnPage(1) from second-to-last page
+                view.setContentOffset(CGPoint(x: 0, y: ch45Pages[ch45Pages.count - 2].offset), animated: false)
+                try await Task.sleep(nanoseconds: 30_000_000)
+                coordinator.turnPage(1)
+                try await Task.sleep(nanoseconds: animation == 2 ? 450_000_000 : 50_000_000)
+                XCTAssertEqual(view.contentOffset.y, ch45Pages.last!.offset, accuracy: 0.5)
+
+                // Turn past last page of Ch 45 -> enter Ch 46
+                coordinator.turnPage(1)
+                for _ in 0..<40 {
+                    if vm.currentIndex == 1, vm.hasLoadedCurrentChapter, view.text.hasPrefix("第46章") { break }
+                    try await Task.sleep(nanoseconds: 50_000_000)
+                }
+                try await Task.sleep(nanoseconds: 250_000_000)
+
+                XCTAssertEqual(vm.currentIndex, 1)
+                XCTAssertTrue(view.text.hasPrefix("第46章"), "Expected ch46 text, got prefix: \(view.text.prefix(20))")
+                XCTAssertEqual(
+                    view.contentOffset.y, 0, accuracy: 0.5,
+                    "REAL ReaderView failed! anim=\(animation) uncached=\(forceUncached) offset=\(view.contentOffset.y) selected=\(view.selectedRange) contentSize=\(view.contentSize) inset=\(view.contentInset)"
+                )
+            }
+        }
+    }
+
+    func testStyleChangePreservesCurrentReadingPageInsteadOfResettingToChapterStart() async throws {
+        let text = String(repeating: "这是一段用来验证修改字号或行距时保持当前阅读位置的正文内容。\n", count: 90)
+        final class StyleModel: ObservableObject {
+            @Published var lineSpacing = 12.0
+            @Published var readerPosition = 0
+            @Published var currentPage = 1
+            @Published var totalPages = 1
+            @Published var pageRanges: [NSRange] = []
+        }
+        struct StyleView: View {
+            @ObservedObject var model: StyleModel
+            let text: String
+            var body: some View {
+                ReaderTextView(
+                    text: text, title: "第45章 样式测试",
+                    previousTitle: nil, previousText: "", isPreviousReady: false,
+                    continuationTitle: nil, continuationText: "", isContinuationReady: false, isVolume: false,
+                    fontSize: 24, fontPath: "", letterSpacing: 0.1, lineSpacing: model.lineSpacing, paragraphSpacing: 4,
+                    paragraphIndent: "　　", paddingLeft: 16, paddingRight: 16, paddingTop: 6, paddingBottom: 6,
+                    headerInset: 0, footerInset: 0, fontWeight: 0, titleMode: 0, titleSize: 4,
+                    titleTopSpacing: 16, titleBottomSpacing: 24, underlineMode: 0, isSelectable: false,
+                    fullJustify: true, pageAnimation: 4, isEInkMode: false, clickActions: Array(repeating: 0, count: 9),
+                    backgroundColor: .white, foregroundColor: .black,
+                    requestedPosition: 0, jumpPosition: nil, renderRevision: 0,
+                    readerPosition: $model.readerPosition, pageRanges: $model.pageRanges,
+                    currentPage: $model.currentPage, totalPages: $model.totalPages,
+                    isAutoReading: false, isAutoReadPaused: false, isLoadingNextChapter: false, secondsPerScreen: 10,
+                    onReachedEnd: { _ in }, onReachedStart: { _ in }, onEnteredPrevious: { _ in },
+                    onEnteredContinuation: { _ in }, onDeferredRender: {}, onCancelNextLoading: {},
+                    onPageChanged: {}, onTapAction: { _ in },
+                    holdsDisplayedPage: false, chapterGeneration: 1
+                )
+            }
+        }
+
+        let model = StyleModel()
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 430, height: 850))
+        let host = UIHostingController(rootView: StyleView(model: model, text: text))
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        host.view.layoutIfNeeded()
+        defer { window.isHidden = true }
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        let view = try XCTUnwrap(findTextView(host.view))
+        let coordinator = try XCTUnwrap(view.delegate as? ReaderTextView.Coordinator)
+        defer { coordinator.invalidate() }
+
+        for _ in 0..<4 {
+            coordinator.turnPage(1)
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertGreaterThan(view.contentOffset.y, 0)
+        XCTAssertEqual(model.currentPage, 5)
+
+        // Changing lineSpacing on the same chapter must NOT jump back to page 1.
+        model.lineSpacing = 16.0
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertGreaterThan(view.contentOffset.y, 0)
+        XCTAssertGreaterThan(model.currentPage, 1)
+    }
+
     private func findTextView(_ view: UIView) -> UITextView? {
         (view as? UITextView) ?? view.subviews.lazy.compactMap(findTextView).first
     }

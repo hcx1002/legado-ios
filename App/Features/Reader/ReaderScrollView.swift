@@ -51,6 +51,7 @@ struct ReaderScrollView: UIViewRepresentable {
         private var wasLoadingBehind = false
         private var lastPageKey = ""
         private var reachedEnd = false
+        private var lastPageTurnRequestID: UUID?
         #if DEBUG
         private var decelerationInsertions = 0
         private var continuedDecelerations = 0
@@ -182,6 +183,15 @@ struct ReaderScrollView: UIViewRepresentable {
                     seek(chapter: parent.activeIndex, position: position, includeHeading: position == 0)
                 }
             } else { jumpKey = nil }
+            if let request = config.pageTurnRequest, lastPageTurnRequestID != request.id {
+                lastPageTurnRequestID = request.id
+                let step = max(view.bounds.height * 0.88, 120)
+                let maxY = max(0, view.contentSize.height - view.bounds.height)
+                let targetY = min(max(view.contentOffset.y + CGFloat(request.direction) * step, 0), maxY)
+                Task { @MainActor [weak view] in
+                    view?.setContentOffset(CGPoint(x: 0, y: targetY), animated: true)
+                }
+            }
             scheduleReport()
         }
 

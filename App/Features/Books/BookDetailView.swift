@@ -72,7 +72,7 @@ struct BookDetailView: View {
                             }
                         }
                     }
-                    if model.source.loginUrl?.isEmpty == false {
+                    if model.source.loginUrl?.isEmpty == false || model.source.loginUi?.isEmpty == false {
                         NavigationLink {
                             SourceLoginView(source: model.source)
                         } label: {

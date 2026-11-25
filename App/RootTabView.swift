@@ -2204,7 +2204,9 @@ private struct ReadingPreferencesView: View {
     @AppStorage("titleBottomSpacing") private var titleBottomSpacing = ReaderTypography.defaultTitleBottomSpacing
     @AppStorage("underlineMode") private var underlineMode = 0
     @AppStorage("readerTheme") private var theme = "wechat"
+    @AppStorage("themeMode") private var themeMode = "0"
     @AppStorage("pageAnim") private var pageAnimation = 0
+    @AppStorage("volumeKeyPage") private var volumeKeyPage = false
     @AppStorage("readerKeepScreenOn") private var keepScreenOn = false
     @AppStorage("readerHideHomeIndicator") private var hideHomeIndicator = false
 
@@ -2265,6 +2267,7 @@ private struct ReadingPreferencesView: View {
                     Text("滚动").tag(3)
                     Text("无动画").tag(4)
                 }
+                Toggle("音量键翻页", isOn: $volumeKeyPage)
             }
             Section("屏幕") {
                 Toggle("阅读时不自动锁屏", isOn: $keepScreenOn)
@@ -2274,6 +2277,7 @@ private struct ReadingPreferencesView: View {
                 ForEach(ReaderStylePreset.legadoDefaults) { preset in
                     Button {
                         theme = preset.id
+                        themeMode = ReaderStylePreset.appThemeMode(for: preset.id)
                     } label: {
                         HStack {
                             RoundedRectangle(cornerRadius: 5)

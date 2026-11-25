@@ -1,3 +1,5 @@
+import AVFoundation
+import MediaPlayer
 import SafariServices
 import SwiftUI
 import UIKit
@@ -495,6 +497,171 @@ struct ReaderChapterLoadingOverlay: View {
         .task {
             do { try await Task.sleep(nanoseconds: 180_000_000) } catch { return }
             showsIndicator = true
+        }
+    }
+}
+
+struct ReaderPageTurnRequest: Equatable {
+    let id = UUID()
+    let direction: Int
+}
+
+struct ReaderVolumeKeyMonitor: UIViewRepresentable {
+    let isEnabled: Bool
+    let onPageTurn: (Int) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(onPageTurn: onPageTurn) }
+
+    func makeUIView(context: Context) -> UIView {
+        let host = UIView(frame: CGRect(x: -1000, y: -1000, width: 100, height: 40))
+        host.alpha = 0.01
+        host.isUserInteractionEnabled = false
+        host.clipsToBounds = true
+        context.coordinator.attach(to: host)
+        context.coordinator.setEnabled(isEnabled)
+        return host
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.onPageTurn = onPageTurn
+        context.coordinator.setEnabled(isEnabled)
+    }
+
+    static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
+        coordinator.teardown()
+    }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        var onPageTurn: (Int) -> Void
+        private weak var hostView: UIView?
+        private var volumeView: MPVolumeView?
+        private var volumeObservation: NSKeyValueObservation?
+        private var resignObserver: NSObjectProtocol?
+        private var activeObserver: NSObjectProtocol?
+        private var isActive = false
+        private var isEnabled = false
+        private var baselineVolume: Float = 0.5
+        private var originalVolume: Float?
+        private var ignoringUntil: CFTimeInterval = 0
+
+        init(onPageTurn: @escaping (Int) -> Void) {
+            self.onPageTurn = onPageTurn
+            super.init()
+            resignObserver = NotificationCenter.default.addObserver(
+                forName: UIApplication.willResignActiveNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.stop(restoreOriginalVolume: true) }
+            }
+            activeObserver = NotificationCenter.default.addObserver(
+                forName: UIApplication.didBecomeActiveNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self, self.isEnabled else { return }
+                    self.start()
+                }
+            }
+        }
+
+        func teardown() {
+            stop(restoreOriginalVolume: true)
+            if let resignObserver {
+                NotificationCenter.default.removeObserver(resignObserver)
+                self.resignObserver = nil
+            }
+            if let activeObserver {
+                NotificationCenter.default.removeObserver(activeObserver)
+                self.activeObserver = nil
+            }
+        }
+
+        func attach(to host: UIView) {
+            hostView = host
+        }
+
+        func setEnabled(_ enabled: Bool) {
+            isEnabled = enabled
+            if enabled {
+                if !isActive { start() }
+            } else {
+                if isActive { stop(restoreOriginalVolume: true) }
+            }
+        }
+
+        private func start() {
+            guard !isActive else { return }
+            let session = AVAudioSession.sharedInstance()
+            try? session.setCategory(.ambient, options: [.mixWithOthers])
+            try? session.setActive(true)
+
+            if volumeView == nil, let hostView {
+                let mpView = MPVolumeView(frame: CGRect(x: 0, y: 0, width: 100, height: 40))
+                mpView.showsVolumeSlider = true
+                hostView.addSubview(mpView)
+                volumeView = mpView
+            }
+
+            let current = session.outputVolume
+            originalVolume = current
+            if current <= 0.06 {
+                baselineVolume = 0.125
+                setSystemVolume(baselineVolume, ignoreDuration: 0.4)
+            } else if current >= 0.94 {
+                baselineVolume = 0.875
+                setSystemVolume(baselineVolume, ignoreDuration: 0.4)
+            } else {
+                baselineVolume = current
+                ignoringUntil = CACurrentMediaTime() + 0.15
+            }
+
+            isActive = true
+            volumeObservation = session.observe(\.outputVolume, options: [.new]) { [weak self] _, change in
+                guard let newVolume = change.newValue else { return }
+                Task { @MainActor [weak self] in
+                    self?.handleVolumeChange(newVolume)
+                }
+            }
+        }
+
+        func stop(restoreOriginalVolume: Bool) {
+            volumeObservation?.invalidate()
+            volumeObservation = nil
+            if restoreOriginalVolume, let originalVolume, abs(originalVolume - baselineVolume) > 0.01 {
+                setSystemVolume(originalVolume, ignoreDuration: 0.3)
+            }
+            originalVolume = nil
+            volumeView?.removeFromSuperview()
+            volumeView = nil
+            isActive = false
+        }
+
+        private func handleVolumeChange(_ newVolume: Float) {
+            guard isActive, CACurrentMediaTime() >= ignoringUntil else { return }
+            let delta = newVolume - baselineVolume
+            guard abs(delta) >= 0.005 else { return }
+            // 音量减 -> 下一页 (1)，音量加 -> 上一页 (-1)
+            let direction = delta < 0 ? 1 : -1
+            setSystemVolume(baselineVolume, ignoreDuration: 0.25)
+            onPageTurn(direction)
+        }
+
+        private func setSystemVolume(_ value: Float, ignoreDuration: CFTimeInterval) {
+            ignoringUntil = CACurrentMediaTime() + ignoreDuration
+            let target = min(max(value, 0.0), 1.0)
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 20_000_000)
+                guard let slider = self?.volumeSlider() else { return }
+                slider.setValue(target, animated: false)
+                slider.sendActions(for: .touchUpInside)
+            }
+        }
+
+        private func volumeSlider() -> UISlider? {
+            volumeView?.subviews.compactMap { $0 as? UISlider }.first
         }
     }
 }

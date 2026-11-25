@@ -460,18 +460,25 @@ public final class LegadoCookieStore: @unchecked Sendable {
     public func setCookie(_ cookie: String, for value: String) {
         guard let url = normalizedURL(value), !cookie.isEmpty else { return }
         var cookies = HTTPCookie.cookies(withResponseHeaderFields: ["Set-Cookie": cookie], for: url)
-        if cookies.isEmpty,
-           let host = url.host,
-           let first = cookie.split(separator: ";").first {
-            let pair = first.split(separator: "=", maxSplits: 1).map(String.init)
-            if pair.count == 2, let fallback = HTTPCookie(properties: [
-                .name: pair[0].trimmingCharacters(in: .whitespaces),
-                .value: pair[1],
-                .domain: host,
-                .path: "/",
-                .secure: url.scheme == "https" ? "TRUE" : "FALSE"
-            ]) {
-                cookies = [fallback]
+        let persistedHeader = persistentCookieHeader(cookie)
+        if let host = url.host {
+            var existingNames = Set(cookies.map(\.name))
+            for part in persistedHeader.split(separator: ";") {
+                let pair = part.split(separator: "=", maxSplits: 1).map(String.init)
+                guard pair.count == 2 else { continue }
+                let name = pair[0].trimmingCharacters(in: .whitespaces)
+                guard !name.isEmpty, !existingNames.contains(name) else { continue }
+                let cookieValue = pair[1].trimmingCharacters(in: .whitespaces)
+                if let extra = HTTPCookie(properties: [
+                    .name: name,
+                    .value: cookieValue,
+                    .domain: host,
+                    .path: "/",
+                    .secure: url.scheme == "https" ? "TRUE" : "FALSE"
+                ]) {
+                    cookies.append(extra)
+                    existingNames.insert(name)
+                }
             }
         }
         lock.lock()
@@ -480,7 +487,7 @@ public final class LegadoCookieStore: @unchecked Sendable {
         let old = persistent.cookie(for: persistenceKey(url)) ?? ""
         persistent.putCookie(
             key: persistenceKey(url),
-            value: mergeCookieHeaders(old, persistentCookieHeader(cookie))
+            value: mergeCookieHeaders(old, persistedHeader)
         )
     }
 
@@ -558,7 +565,7 @@ public final class LegadoCookieStore: @unchecked Sendable {
     }
 
     private func persistentCookieHeader(_ header: String) -> String {
-        let attributes = Set(["path", "domain", "expires", "max-age", "samesite"])
+        let attributes = Set(["path", "domain", "expires", "max-age", "samesite", "priority", "secure", "httponly"])
         return header.split(separator: ";").compactMap { part -> String? in
             let pair = part.split(separator: "=", maxSplits: 1).map(String.init)
             guard pair.count == 2 else { return nil }

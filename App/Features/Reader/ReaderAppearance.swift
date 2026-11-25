@@ -41,6 +41,10 @@ struct ReaderStylePreset: Identifiable {
         }
         return legadoDefaults.first(where: { $0.id == migratedID }) ?? legadoDefaults[0]
     }
+
+    static func appThemeMode(for presetID: String) -> String {
+        resolve(presetID).id == "night" ? "2" : "1"
+    }
 }
 
 private extension UIColor {

@@ -359,8 +359,24 @@ private struct ExploreSourceView: View {
         .background(ReadingTheme.canvas)
         .navigationTitle(model.source.bookSourceName)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                if model.source.loginUrl?.isEmpty == false || model.source.loginUi?.isEmpty == false {
+                    NavigationLink {
+                        SourceLoginView(source: model.source)
+                    } label: {
+                        Label("登录", systemImage: "person.badge.key")
+                    }
+                }
+            }
+        }
         .task { await model.load() }
         .refreshable { await model.reload() }
+        .onReceive(NotificationCenter.default.publisher(for: AppJavaScriptUIBridge.exploreRefreshNotification)) { notification in
+            if let sourceID = notification.object as? String, sourceID == model.source.bookSourceUrl {
+                Task { await model.reload() }
+            }
+        }
     }
 
     private var kindPicker: some View {

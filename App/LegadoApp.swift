@@ -13,6 +13,7 @@ struct LegadoApp: App {
     init() {
         AppDiagnostics.shared.start()
         SourceWebViewExecutorRegistry.shared.register(WKSourceWebViewExecutor())
+        JavaScriptUIBridgeRegistry.shared.register(AppJavaScriptUIBridge.shared)
         let demo = ProcessInfo.processInfo.arguments.contains("-uiDemo")
         _sourceLibrary = StateObject(wrappedValue: demo
             ? SourceLibraryModel.demo(sources: DemoContent.sources)
