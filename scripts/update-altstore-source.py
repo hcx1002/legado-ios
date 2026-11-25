@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 
-def make_source(ipa: Path, release: dict, repository: str, branch: str) -> dict:
+def make_source(ipa: Path, release: dict, repository: str, branch: str, expected_bundle_id: str) -> dict:
     if release.get("draft") or release.get("prerelease"):
         raise ValueError("Only published stable releases belong in this source")
     date = release["published_at"]
@@ -40,11 +40,12 @@ def make_source(ipa: Path, release: dict, repository: str, branch: str) -> dict:
     for key in ("CFBundleIdentifier", "CFBundleShortVersionString", "CFBundleVersion", "MinimumOSVersion"):
         if not isinstance(info.get(key), str) or not info[key] or "$(" in info[key]:
             raise ValueError(f"IPA has an invalid or unresolved {key}")
-    if info["CFBundleIdentifier"] != "com.epiboly.legado":
+    if info["CFBundleIdentifier"] != expected_bundle_id:
         raise ValueError("IPA bundle identifier does not belong to this app")
     if release["tag_name"] != "v" + info["CFBundleShortVersionString"]:
         raise ValueError("Release tag does not match the IPA version")
 
+    app_name = info.get("CFBundleDisplayName") or info["CFBundleName"]
     website = f"https://github.com/{repository}"
     download_url = f"{website}/releases/download/{quote(release['tag_name'], safe='')}/{quote(ipa.name, safe='')}"
     if asset["browser_download_url"] != download_url:
@@ -61,16 +62,16 @@ def make_source(ipa: Path, release: dict, repository: str, branch: str) -> dict:
         "minOSVersion": info["MinimumOSVersion"],
     }
     return {
-        "name": "小浣熊阅读",
-        "identifier": "com.epiboly.legado.source",
-        "subtitle": "小浣熊阅读官方应用源",
-        "description": "小浣熊阅读的最新正式版，供 AltStore Classic、SideStore 和 LiveContainer 添加。",
+        "name": app_name,
+        "identifier": f"{info['CFBundleIdentifier']}.source",
+        "subtitle": f"{app_name}应用源",
+        "description": f"{app_name}的最新正式版，供 AltStore Classic、SideStore 和 LiveContainer 添加。",
         "sourceURL": f"{raw_url}/docs/altstore.json",
         "website": website,
         "iconURL": icon_url,
         "tintColor": "#315C50",
         "apps": [{
-            "name": info.get("CFBundleDisplayName") or info["CFBundleName"],
+            "name": app_name,
             "bundleIdentifier": info["CFBundleIdentifier"],
             "developerName": repository.split("/")[0],
             "subtitle": "搜书快一点，读书舒服一点。",
@@ -102,13 +103,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ipa", required=True, type=Path)
     parser.add_argument("--release", required=True, type=Path, help="GitHub REST release JSON")
-    parser.add_argument("--repository", default="Aminark/legado-ios")
+    parser.add_argument("--repository", default="hcx1002/legado-ios")
     parser.add_argument("--branch", default="main", help="Branch hosting the source and images")
+    parser.add_argument("--bundle-id", default="vip.huancaixi.legado")
     parser.add_argument("--output", type=Path, default=Path("docs/altstore.json"))
     args = parser.parse_args()
     try:
         source = make_source(args.ipa, json.loads(args.release.read_text(encoding="utf-8")),
-                             args.repository, args.branch)
+                             args.repository, args.branch, args.bundle_id)
     except (ValueError, KeyError, OSError, zipfile.BadZipFile) as error:
         parser.error(str(error))
     args.output.parent.mkdir(parents=True, exist_ok=True)

@@ -1,55 +1,55 @@
 {
-  "name": "小浣熊阅读",
-  "identifier": "com.epiboly.legado.source",
-  "subtitle": "小浣熊阅读官方应用源",
-  "description": "小浣熊阅读的最新正式版，供 AltStore Classic、SideStore 和 LiveContainer 添加。",
-  "sourceURL": "https://raw.githubusercontent.com/Aminark/legado-ios/main/docs/altstore.json",
-  "website": "https://github.com/Aminark/legado-ios",
-  "iconURL": "https://raw.githubusercontent.com/Aminark/legado-ios/main/App/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png",
+  "name": "幻彩希阅读",
+  "identifier": "vip.huancaixi.legado.source",
+  "subtitle": "幻彩希阅读应用源",
+  "description": "幻彩希阅读的最新正式版，供 AltStore Classic、SideStore 和 LiveContainer 添加。",
+  "sourceURL": "https://raw.githubusercontent.com/hcx1002/legado-ios/main/docs/altstore.json",
+  "website": "https://github.com/hcx1002/legado-ios",
+  "iconURL": "https://raw.githubusercontent.com/hcx1002/legado-ios/main/App/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png",
   "tintColor": "#315C50",
   "apps": [
     {
-      "name": "小浣熊阅读",
-      "bundleIdentifier": "com.epiboly.legado",
-      "developerName": "Aminark",
+      "name": "幻彩希阅读",
+      "bundleIdentifier": "vip.huancaixi.legado",
+      "developerName": "hcx1002",
       "subtitle": "搜书快一点，读书舒服一点。",
       "localizedDescription": "一款优先兼容阅读书源的开源 iOS 阅读器，支持书架、搜索、阅读排版、本地 TXT、语音朗读和 RSS。应用不提供书源或在线书库，书源需自行导入。",
-      "iconURL": "https://raw.githubusercontent.com/Aminark/legado-ios/main/App/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png",
+      "iconURL": "https://raw.githubusercontent.com/hcx1002/legado-ios/main/App/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png",
       "tintColor": "#315C50",
       "category": "utilities",
       "screenshots": [
         {
-          "imageURL": "https://raw.githubusercontent.com/Aminark/legado-ios/main/docs/images/bookshelf.png",
+          "imageURL": "https://raw.githubusercontent.com/hcx1002/legado-ios/main/docs/images/bookshelf.png",
           "width": 1206,
           "height": 2622
         },
         {
-          "imageURL": "https://raw.githubusercontent.com/Aminark/legado-ios/main/docs/images/search.png",
+          "imageURL": "https://raw.githubusercontent.com/hcx1002/legado-ios/main/docs/images/search.png",
           "width": 1206,
           "height": 2622
         },
         {
-          "imageURL": "https://raw.githubusercontent.com/Aminark/legado-ios/main/docs/images/reader.png",
+          "imageURL": "https://raw.githubusercontent.com/hcx1002/legado-ios/main/docs/images/reader.png",
           "width": 1206,
           "height": 2622
         }
       ],
       "versions": [
         {
-          "version": "0.1.16",
-          "buildVersion": "30",
-          "date": "2026-11-23T14:47:50Z",
-          "localizedDescription": "小浣熊阅读 0.1.16 正式版（构建 30），支持 iOS / iPadOS 15.0 及以上。\n\n- **在线小说续读和切章**　书架和书籍详情页会提前准备上次读到的正文。已缓存的章节可以离线打开，来回切换时会复用相邻章节的正文和排版。\n- **后台缓存**　阅读时默认静默缓存后面 5 章，往后读会继续补齐。接近目录末尾时，会为允许更新的书籍检查新章节。\n- **目录和排版**　目录改为全屏，未下载的章节右侧有云图标。章节标题与正文的间距更宽，阅读设置中的文字统一左对齐。支持的书源可查看本章评论。\n- **EPUB 与字体**　可以选择默认使用原书排版或文字阅读模式。原书目录支持折叠，改善章节跳转、阅读位置恢复和自定义字体导入。\n\n下载附件中的 IPA，使用自己的签名工具安装。可用同页的 SHA256SUMS 校验下载文件。此版本已在模拟器验证缓存续读与前后切章，尚未进行真机安装验证。应用不附带书源或在线书库，在线阅读需自行导入书源。\n",
-          "downloadURL": "https://github.com/Aminark/legado-ios/releases/download/v0.1.16/legado-ios-v0.1.16-build30-unsigned.ipa",
-          "size": 16507334,
+          "version": "0.1.16.1",
+          "buildVersion": "31",
+          "date": "2026-11-25T06:46:40Z",
+          "localizedDescription": "幻彩希阅读 0.1.16.1（构建 31），支持 iOS / iPadOS 15.0 及以上。\n\n- **自定义书源登录兼容**　支持 `loginUi` 表单与 JS `loginUrl` 登录流程，补齐 `cache` / `source` / `book` / `java` 扩展接口与多键值 Cookie 存储，支持内嵌交互浏览器登录回传。\n- **音量键翻页**　在阅读设置与全局设置中新增「音量键翻页」（音量减下一页、音量加上一页），语音朗读及弹窗期间自动恢复系统音量调节。\n- **跨章翻页修复**　修复从长章节末页翻入较短下一章时排版重排偏移导致跳到章末的问题，以及样式调整时的页码定位问题。\n- **日夜主题联动**　选择「夜间」阅读背景时自动切换软件为深色外观，选择其他预设背景时自动切换为浅色外观。\n\n下载附件中的无签名 IPA，使用 SideStore、AltStore、LiveContainer 或自签工具安装，可用同页 `SHA256SUMS` 校验文件完整性。",
+          "downloadURL": "https://github.com/hcx1002/legado-ios/releases/download/v0.1.16.1/legado-ios-v0.1.16.1-build31-unsigned.ipa",
+          "size": 19706275,
           "minOSVersion": "15.0"
         }
       ],
-      "version": "0.1.16",
-      "versionDate": "2026-11-23T14:47:50Z",
-      "versionDescription": "小浣熊阅读 0.1.16 正式版（构建 30），支持 iOS / iPadOS 15.0 及以上。\n\n- **在线小说续读和切章**　书架和书籍详情页会提前准备上次读到的正文。已缓存的章节可以离线打开，来回切换时会复用相邻章节的正文和排版。\n- **后台缓存**　阅读时默认静默缓存后面 5 章，往后读会继续补齐。接近目录末尾时，会为允许更新的书籍检查新章节。\n- **目录和排版**　目录改为全屏，未下载的章节右侧有云图标。章节标题与正文的间距更宽，阅读设置中的文字统一左对齐。支持的书源可查看本章评论。\n- **EPUB 与字体**　可以选择默认使用原书排版或文字阅读模式。原书目录支持折叠，改善章节跳转、阅读位置恢复和自定义字体导入。\n\n下载附件中的 IPA，使用自己的签名工具安装。可用同页的 SHA256SUMS 校验下载文件。此版本已在模拟器验证缓存续读与前后切章，尚未进行真机安装验证。应用不附带书源或在线书库，在线阅读需自行导入书源。\n",
-      "downloadURL": "https://github.com/Aminark/legado-ios/releases/download/v0.1.16/legado-ios-v0.1.16-build30-unsigned.ipa",
-      "size": 16507334,
+      "version": "0.1.16.1",
+      "versionDate": "2026-11-25T06:46:40Z",
+      "versionDescription": "幻彩希阅读 0.1.16.1（构建 31），支持 iOS / iPadOS 15.0 及以上。\n\n- **自定义书源登录兼容**　支持 `loginUi` 表单与 JS `loginUrl` 登录流程，补齐 `cache` / `source` / `book` / `java` 扩展接口与多键值 Cookie 存储，支持内嵌交互浏览器登录回传。\n- **音量键翻页**　在阅读设置与全局设置中新增「音量键翻页」（音量减下一页、音量加上一页），语音朗读及弹窗期间自动恢复系统音量调节。\n- **跨章翻页修复**　修复从长章节末页翻入较短下一章时排版重排偏移导致跳到章末的问题，以及样式调整时的页码定位问题。\n- **日夜主题联动**　选择「夜间」阅读背景时自动切换软件为深色外观，选择其他预设背景时自动切换为浅色外观。\n\n下载附件中的无签名 IPA，使用 SideStore、AltStore、LiveContainer 或自签工具安装，可用同页 `SHA256SUMS` 校验文件完整性。",
+      "downloadURL": "https://github.com/hcx1002/legado-ios/releases/download/v0.1.16.1/legado-ios-v0.1.16.1-build31-unsigned.ipa",
+      "size": 19706275,
       "appPermissions": {
         "entitlements": [],
         "privacy": {
