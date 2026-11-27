@@ -1596,7 +1596,7 @@ private struct SettingsView: View {
     private var supportSection: some View {
         settingSection("项目与支持") {
             Link(destination: AppIdentity.authorURL) {
-                settingRow("开发者 Aminark", icon: "person.crop.circle", isExternal: true)
+                settingRow("开发者 \(AppIdentity.authorName)", icon: "person.crop.circle", isExternal: true)
             }
             .buttonStyle(.plain)
             Link(destination: AppIdentity.projectURL) {
