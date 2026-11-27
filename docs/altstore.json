@@ -36,20 +36,20 @@
       ],
       "versions": [
         {
-          "version": "0.1.16.1",
-          "buildVersion": "31",
-          "date": "2026-11-25T06:46:40Z",
-          "localizedDescription": "幻彩希阅读 0.1.16.1（构建 31），支持 iOS / iPadOS 15.0 及以上。\n\n- **自定义书源登录兼容**　支持 `loginUi` 表单与 JS `loginUrl` 登录流程，补齐 `cache` / `source` / `book` / `java` 扩展接口与多键值 Cookie 存储，支持内嵌交互浏览器登录回传。\n- **音量键翻页**　在阅读设置与全局设置中新增「音量键翻页」（音量减下一页、音量加上一页），语音朗读及弹窗期间自动恢复系统音量调节。\n- **跨章翻页修复**　修复从长章节末页翻入较短下一章时排版重排偏移导致跳到章末的问题，以及样式调整时的页码定位问题。\n- **日夜主题联动**　选择「夜间」阅读背景时自动切换软件为深色外观，选择其他预设背景时自动切换为浅色外观。\n\n下载附件中的无签名 IPA，使用 SideStore、AltStore、LiveContainer 或自签工具安装，可用同页 `SHA256SUMS` 校验文件完整性。",
-          "downloadURL": "https://github.com/hcx1002/legado-ios/releases/download/v0.1.16.1/legado-ios-v0.1.16.1-build31-unsigned.ipa",
-          "size": 19706275,
+          "version": "0.1.16.2",
+          "buildVersion": "32",
+          "date": "2026-11-27T03:33:33Z",
+          "localizedDescription": "幻彩希阅读 0.1.16.2（构建 32），支持 iOS / iPadOS 15.0 及以上。\n\n- **段评与本章说卡片支持**　新增原生 SVG 矢量图渲染器与 TextKit 图文混排，小说正文内嵌的段评/本章说 SVG 卡片留在文字阅读器中正常排版显示，不再误切为漫画模式。\n- **点击卡片半屏查看评论**　修复图片 URL 中 `&para=` 被误转义及 `data:` URI 尾部 JSON 选项污染解码的问题；在翻页与连续滚动模式下支持点击段评/本章说卡片执行书源交互脚本，并以半屏弹窗（支持上拉全屏）展示评论页，同时修复含中文参数链接的内置浏览器加载问题。\n- **全新品牌与图标**　统一应用品牌为「幻彩希阅读」，更换全新磨砂玻璃幻彩书本图标，更新「我的」「关于」页面及 README，完整保留上游开源署名与 GPL v3 声明。\n\n下载附件中的无签名 IPA，使用 SideStore、AltStore、LiveContainer 或自签工具安装，可用同页 `SHA256SUMS` 校验文件完整性。\n",
+          "downloadURL": "https://github.com/hcx1002/legado-ios/releases/download/v0.1.16.2/legado-ios-v0.1.16.2-build32-unsigned.ipa",
+          "size": 18577594,
           "minOSVersion": "15.0"
         }
       ],
-      "version": "0.1.16.1",
-      "versionDate": "2026-11-25T06:46:40Z",
-      "versionDescription": "幻彩希阅读 0.1.16.1（构建 31），支持 iOS / iPadOS 15.0 及以上。\n\n- **自定义书源登录兼容**　支持 `loginUi` 表单与 JS `loginUrl` 登录流程，补齐 `cache` / `source` / `book` / `java` 扩展接口与多键值 Cookie 存储，支持内嵌交互浏览器登录回传。\n- **音量键翻页**　在阅读设置与全局设置中新增「音量键翻页」（音量减下一页、音量加上一页），语音朗读及弹窗期间自动恢复系统音量调节。\n- **跨章翻页修复**　修复从长章节末页翻入较短下一章时排版重排偏移导致跳到章末的问题，以及样式调整时的页码定位问题。\n- **日夜主题联动**　选择「夜间」阅读背景时自动切换软件为深色外观，选择其他预设背景时自动切换为浅色外观。\n\n下载附件中的无签名 IPA，使用 SideStore、AltStore、LiveContainer 或自签工具安装，可用同页 `SHA256SUMS` 校验文件完整性。",
-      "downloadURL": "https://github.com/hcx1002/legado-ios/releases/download/v0.1.16.1/legado-ios-v0.1.16.1-build31-unsigned.ipa",
-      "size": 19706275,
+      "version": "0.1.16.2",
+      "versionDate": "2026-11-27T03:33:33Z",
+      "versionDescription": "幻彩希阅读 0.1.16.2（构建 32），支持 iOS / iPadOS 15.0 及以上。\n\n- **段评与本章说卡片支持**　新增原生 SVG 矢量图渲染器与 TextKit 图文混排，小说正文内嵌的段评/本章说 SVG 卡片留在文字阅读器中正常排版显示，不再误切为漫画模式。\n- **点击卡片半屏查看评论**　修复图片 URL 中 `&para=` 被误转义及 `data:` URI 尾部 JSON 选项污染解码的问题；在翻页与连续滚动模式下支持点击段评/本章说卡片执行书源交互脚本，并以半屏弹窗（支持上拉全屏）展示评论页，同时修复含中文参数链接的内置浏览器加载问题。\n- **全新品牌与图标**　统一应用品牌为「幻彩希阅读」，更换全新磨砂玻璃幻彩书本图标，更新「我的」「关于」页面及 README，完整保留上游开源署名与 GPL v3 声明。\n\n下载附件中的无签名 IPA，使用 SideStore、AltStore、LiveContainer 或自签工具安装，可用同页 `SHA256SUMS` 校验文件完整性。\n",
+      "downloadURL": "https://github.com/hcx1002/legado-ios/releases/download/v0.1.16.2/legado-ios-v0.1.16.2-build32-unsigned.ipa",
+      "size": 18577594,
       "appPermissions": {
         "entitlements": [],
         "privacy": {
