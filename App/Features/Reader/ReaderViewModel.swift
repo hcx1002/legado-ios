@@ -98,7 +98,33 @@ final class ReaderViewModel: ObservableObject {
         }
     }
     @Published private(set) var imageBlocks: [ChapterContentBlock] = []
-    var hasImageContent: Bool { imageBlocks.contains { if case .image = $0.content { return true }; return false } }
+    /// Pure image / comic chapters use ReaderComicView. Text chapters with inline SVG
+    /// or interactive comment cards (e.g. paragraph/chapter reviews) stay in the text reader.
+    var hasImageContent: Bool {
+        guard imageBlocks.contains(where: { if case .image = $0.content { return true }; return false }) else {
+            return false
+        }
+        if source?.bookSourceType == 2 { return true }
+        var hasText = false
+        var hasInlineOrInteractiveCard = false
+        for block in imageBlocks {
+            switch block.content {
+            case .text(let value):
+                if !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { hasText = true }
+            case .image(let address):
+                let descriptor = ChapterImageParser.parseAddress(address)
+                if descriptor.clickJS != nil
+                    || descriptor.url.lowercased().hasPrefix("data:image/svg+xml")
+                    || descriptor.style?.uppercased() == "TEXT" {
+                    hasInlineOrInteractiveCard = true
+                }
+            }
+        }
+        if hasText && (hasInlineOrInteractiveCard || source?.ruleContent?.imageStyle?.uppercased() == "TEXT") {
+            return false
+        }
+        return true
+    }
     var imageSource: BookSource { source ?? BookSource(bookSourceUrl: book.origin, bookSourceName: book.originName) }
 
     private func updateImageBlocks() {

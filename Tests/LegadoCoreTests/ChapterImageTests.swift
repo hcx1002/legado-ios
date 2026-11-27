@@ -157,4 +157,24 @@ struct ChapterImageTests {
         #expect(data == Data([0x89, 0x50, 0x4e, 0x47]))
         #expect(await transport.requests.count == 1)
     }
+
+    @Test func interactiveSVGCommentCardsPreserveQueryParamsAndStripOptions() async throws {
+        let svg = #"<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="108"><text x="10" y="60">神评论</text></svg>"#
+        let encodedSVG = Data(svg.utf8).base64EncodedString()
+        let markup = """
+        正文段落。
+        <img src="data:image/svg+xml;base64,\(encodedSVG),{&quot;js&quot;:&quot;showCmt('http://example.test/review?item_id=123&amp;para=23&amp;source=番茄','番茄','段评')&quot;,&quot;style&quot;:&quot;FULL&quot;}">
+        下一段。
+        """
+        let tags = ChapterImageParser().imageTags(in: markup)
+        #expect(tags.count == 1)
+        let descriptor = try #require(tags.first?.descriptor)
+        #expect(descriptor.style == "FULL")
+        #expect(descriptor.clickJS == "showCmt('http://example.test/review?item_id=123&para=23&source=番茄','番茄','段评')")
+        #expect(descriptor.url == "data:image/svg+xml;base64,\(encodedSVG)")
+
+        let decoded = try #require(ChapterImageParser.decodeDataURI(descriptor.rawAddress))
+        #expect(decoded.mimeType == "image/svg+xml")
+        #expect(String(data: decoded.data, encoding: .utf8) == svg)
+    }
 }

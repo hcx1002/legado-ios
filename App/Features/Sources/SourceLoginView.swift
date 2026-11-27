@@ -499,6 +499,12 @@ final class AppJavaScriptUIBridge: ObservableObject, JavaScriptUIBridging, @unch
 
     @Published var latestToast: JavaScriptToastMessage?
     @Published var toastHistory: [JavaScriptToastMessage] = []
+    @MainActor private var halfSheetBrowserUntil: Date?
+
+    @MainActor
+    func preferHalfSheetForNextBrowser(duration: TimeInterval = 15) {
+        halfSheetBrowserUntil = Date().addingTimeInterval(duration)
+    }
 
     func showToast(_ message: String, long: Bool) {
         let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -583,6 +589,15 @@ final class AppJavaScriptUIBridge: ObservableObject, JavaScriptUIBridging, @unch
         )
         let nav = UINavigationController(rootViewController: controller)
         nav.modalPresentationStyle = .pageSheet
+        let useHalfSheet = halfSheetBrowserUntil.map { $0 > Date() } ?? false
+        halfSheetBrowserUntil = nil
+        if useHalfSheet, let sheet = nav.sheetPresentationController {
+            sheet.detents = [.medium(), .large()]
+            sheet.selectedDetentIdentifier = .medium
+            sheet.prefersGrabberVisible = true
+            sheet.prefersScrollingExpandsWhenScrolledToEdge = false
+            sheet.preferredCornerRadius = 20
+        }
         nav.presentationController?.delegate = controller
         presenter.present(nav, animated: true)
     }
@@ -708,7 +723,7 @@ private final class JSInteractiveBrowserViewController: UIViewController, WKNavi
     }
 
     private func installCookiesAndLoad() {
-        let targetURL = URL(string: rawURL) ?? fallbackBaseURL
+        let targetURL = Self.resolvedHTTPURL(rawURL) ?? fallbackBaseURL
         let cookies = targetURL.flatMap { HTTPCookieStorage.shared.cookies(for: $0) } ?? []
         guard !cookies.isEmpty else {
             loadTargetURL()
@@ -729,9 +744,19 @@ private final class JSInteractiveBrowserViewController: UIViewController, WKNavi
     private func loadTargetURL() {
         if let html = Self.decodeDataHTML(rawURL) {
             webView.loadHTMLString(html, baseURL: fallbackBaseURL)
-        } else if let url = URL(string: rawURL) {
+        } else if let url = Self.resolvedHTTPURL(rawURL) {
             webView.load(URLRequest(url: url))
         }
+    }
+
+    private static func resolvedHTTPURL(_ raw: String) -> URL? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let direct = URL(string: trimmed) { return direct }
+        if let encoded = trimmed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed.union(CharacterSet(charactersIn: ":/?#[]@!$&'()*+,;=%-._~"))),
+           let url = URL(string: encoded) {
+            return url
+        }
+        return nil
     }
 
     private static func decodeDataHTML(_ raw: String) -> String? {

@@ -12,10 +12,92 @@ public struct ChapterContentBlock: Equatable, Sendable, Identifiable {
     public let content: Content
 }
 
+public struct ChapterImageDescriptor: Equatable, Sendable {
+    public let rawAddress: String
+    public let url: String
+    public let clickJS: String?
+    public let style: String?
+    public let rawOptions: String?
+
+    public init(rawAddress: String, url: String, clickJS: String? = nil, style: String? = nil, rawOptions: String? = nil) {
+        self.rawAddress = rawAddress
+        self.url = url
+        self.clickJS = clickJS
+        self.style = style
+        self.rawOptions = rawOptions
+    }
+}
+
 /// Keeps image request options intact, including older sources that embed
 /// unescaped JSON quotes inside an img src attribute.
 public struct ChapterImageParser: Sendable {
     public init() {}
+
+    public static func parseAddress(_ rawAddress: String) -> ChapterImageDescriptor {
+        let trimmed = rawAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let expression = try? NSRegularExpression(pattern: #",\s*(?=\{)"#) else {
+            return .init(rawAddress: trimmed, url: trimmed)
+        }
+        let matches = expression.matches(in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed))
+        for match in matches {
+            guard let commaRange = Range(match.range, in: trimmed) else { continue }
+            let jsonCandidate = String(trimmed[commaRange.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard jsonCandidate.hasPrefix("{"), jsonCandidate.hasSuffix("}") else { continue }
+            if let dict = parseOptionsObject(jsonCandidate) {
+                let urlPart = String(trimmed[..<commaRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+                let click = nonEmptyString(dict["click"]) ?? nonEmptyString(dict["js"])
+                let style = nonEmptyString(dict["style"])
+                return .init(rawAddress: trimmed, url: urlPart, clickJS: click, style: style, rawOptions: jsonCandidate)
+            }
+        }
+        return .init(rawAddress: trimmed, url: trimmed)
+    }
+
+    public static func decodeDataURI(_ rawAddress: String) -> (mimeType: String?, data: Data)? {
+        let pure = parseAddress(rawAddress).url
+        guard pure.lowercased().hasPrefix("data:"),
+              let comma = pure.firstIndex(of: ",") else { return nil }
+        let meta = String(pure[pure.index(pure.startIndex, offsetBy: 5)..<comma])
+        let body = String(pure[pure.index(after: comma)...])
+        let parts = meta.split(separator: ";").map(String.init)
+        let mime = parts.first.flatMap { $0.isEmpty ? nil : $0 }
+        let isBase64 = parts.contains { $0.caseInsensitiveCompare("base64") == .orderedSame }
+        if isBase64 {
+            guard let decoded = Data(base64Encoded: body, options: .ignoreUnknownCharacters) else { return nil }
+            return (mime, decoded)
+        }
+        let unescaped = body.removingPercentEncoding ?? body
+        return (mime, Data(unescaped.utf8))
+    }
+
+    private static func parseOptionsObject(_ json: String) -> [String: Any]? {
+        if let data = json.data(using: .utf8),
+           let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            return dict
+        }
+        if let value = try? LegadoURLBuilder.decodeLenientJSON(json),
+           case .object(let map) = value {
+            return map.mapValues { $0.stringValue }
+        }
+        return nil
+    }
+
+    private static func nonEmptyString(_ value: Any?) -> String? {
+        guard let text = value as? String else { return nil }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    public func imageTags(in content: String, baseURL: URL? = nil) -> [(range: Range<String.Index>, descriptor: ChapterImageDescriptor)] {
+        var result: [(Range<String.Index>, ChapterImageDescriptor)] = []
+        for range in ChapterImageMarkup.ranges(in: content) {
+            if let source = imageSource(in: String(content[range])),
+               let address = resolve(source, baseURL: baseURL) {
+                result.append((range, Self.parseAddress(address)))
+            }
+        }
+        return result
+    }
 
     public func blocks(in content: String, baseURL: URL?, allowBareURLs: Bool = false) -> [ChapterContentBlock] {
         var blocks: [ChapterContentBlock] = []
@@ -53,7 +135,9 @@ public struct ChapterImageParser: Sendable {
             if let expression = try? NSRegularExpression(pattern: pattern),
                let match = expression.firstMatch(in: markup, range: NSRange(markup.startIndex..., in: markup)),
                let range = Range(match.range(at: 2), in: markup) {
-                value = try? Parser.unescapeEntities(String(markup[range]), false)
+                // Attribute values must follow HTML5 attribute entity rules so query
+                // parameters like &para=23 are never corrupted into ¶=23.
+                value = try? Parser.unescapeEntities(String(markup[range]), true)
             } else if let element = try? SwiftSoup.parseBodyFragment(markup).select("img,mip-img").first() {
                 value = try? element.attr(name)
             }
@@ -135,6 +219,17 @@ public struct ChapterImageLoader: Sendable {
         if let decode = source.ruleContent?.imageDecode, !decode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             throw ChapterImageError.unsupportedDecode
         }
+        if let (_, payload) = ChapterImageParser.decodeDataURI(address) {
+            guard !payload.isEmpty else { throw ChapterImageError.emptyImage }
+            return payload
+        }
+        let request = try await prepareRequest(address, source: source, book: book, chapter: chapter)
+        let response = try await policy.execute(request, source: source, transport: transport, timeout: 30)
+        guard !response.data.isEmpty else { throw ChapterImageError.emptyImage }
+        return response.data
+    }
+
+    private func prepareRequest(_ address: String, source: BookSource, book: Book, chapter: BookChapter) async throws -> PreparedRequest {
         var request = try await RuleExecutionWorker.run {
             let headers = try BookSourceHeaderResolver().resolve(source)
             var variables = (book.variable.flatMap { try? JSONDecoder().decode([String: String].self, from: Data($0.utf8)) }) ?? [:]
@@ -156,8 +251,6 @@ public struct ChapterImageLoader: Sendable {
            let chapterURL = URL(string: chapter.url), ["http", "https"].contains(chapterURL.scheme?.lowercased() ?? "") {
             request.headers["Referer"] = chapterURL.absoluteString
         }
-        let response = try await policy.execute(request, source: source, transport: transport, timeout: 30)
-        guard !response.data.isEmpty else { throw ChapterImageError.emptyImage }
-        return response.data
+        return request
     }
 }

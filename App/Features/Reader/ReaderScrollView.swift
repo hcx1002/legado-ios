@@ -351,10 +351,17 @@ struct ReaderScrollView: UIViewRepresentable {
         @objc private func tapped(_ gesture: UITapGestureRecognizer) {
             guard let view, !view.isDragging, !view.isDecelerating else { return }
             let point = gesture.location(in: view)
-            if let row = (view.collectionViewLayout as? ReaderContinuousLayout)?.row(at: point.y),
-               blocks[row].chapter.chapter.error != nil {
-                parent.configuration.onTapAction(0)
-                return
+            if let layout = view.collectionViewLayout as? ReaderContinuousLayout,
+               let row = layout.row(at: point.y), blocks.indices.contains(row) {
+                if blocks[row].chapter.chapter.error != nil {
+                    parent.configuration.onTapAction(0)
+                    return
+                }
+                if let descriptor = interactiveImage(at: point, row: row, frames: layout.frames),
+                   let onTapImage = parent.configuration.onTapInteractiveImage {
+                    onTapImage(descriptor)
+                    return
+                }
             }
             let x = point.x - view.bounds.minX, y = point.y - view.bounds.minY
             let column = min(max(Int(x / max(view.bounds.width / 3, 1)), 0), 2)
@@ -363,6 +370,34 @@ struct ReaderScrollView: UIViewRepresentable {
             let actions = parent.configuration.clickActions
             let action = index == 4 ? 0 : (actions.indices.contains(index) ? actions[index] : 0)
             if action != 1, action != 2, action != -1 { parent.configuration.onTapAction(action) }
+        }
+
+        private func interactiveImage(at point: CGPoint, row: Int, frames: [CGRect]) -> ChapterImageDescriptor? {
+            guard blocks.indices.contains(row), frames.indices.contains(row) else { return nil }
+            let block = blocks[row]
+            let layout = block.chapter
+            let manager = layout.manager
+            guard manager.numberOfGlyphs > 0 else { return nil }
+            let containerPoint = CGPoint(
+                x: point.x - layout.left,
+                y: (point.y - frames[row].minY) + block.top
+            )
+            var fraction: CGFloat = 0
+            let glyphIndex = manager.glyphIndex(
+                for: containerPoint,
+                in: layout.container,
+                fractionOfDistanceThroughGlyph: &fraction
+            )
+            guard glyphIndex < manager.numberOfGlyphs else { return nil }
+            let rect = manager.boundingRect(forGlyphRange: NSRange(location: glyphIndex, length: 1), in: layout.container)
+            guard rect.insetBy(dx: -8, dy: -8).contains(containerPoint) else { return nil }
+            let charIndex = manager.characterIndexForGlyph(at: glyphIndex)
+            guard charIndex < layout.storage.length,
+                  let descriptor = layout.storage.attribute(.legadoInteractiveImage, at: charIndex, effectiveRange: nil) as? ChapterImageDescriptor,
+                  descriptor.clickJS != nil else {
+                return nil
+            }
+            return descriptor
         }
 
         @objc private func step(_ link: CADisplayLink) {
@@ -497,7 +532,13 @@ final class ReaderScrollChapterLayout {
         }
         bodyStart = attributed.length
         let body = chapter.error.map { "本章加载失败\n\n\($0)\n\n轻点打开阅读菜单。\n" } ?? (chapter.content.isEmpty ? "本章暂无正文\n" : chapter.content)
-        attributed.append(NSAttributedString(string: body, attributes: typography.bodyAttributes))
+        attributed.append(ReaderAttributedContentBuilder.build(
+            body: body,
+            bodyAttributes: typography.bodyAttributes,
+            contentWidth: textWidth,
+            fontSize: CGFloat(configuration.fontSize),
+            foregroundColor: configuration.foregroundColor
+        ))
         storage = NSTextStorage(attributedString: attributed)
         storage.addLayoutManager(manager)
         manager.addTextContainer(container)

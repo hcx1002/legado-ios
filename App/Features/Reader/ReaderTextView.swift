@@ -110,6 +110,7 @@ struct ReaderTextView: UIViewRepresentable {
     var holdsDisplayedPage = false
     var chapterGeneration = 0
     var pageTurnRequest: ReaderPageTurnRequest? = nil
+    var onTapInteractiveImage: ((ChapterImageDescriptor) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
@@ -193,7 +194,13 @@ struct ReaderTextView: UIViewRepresentable {
         let adjacentContentKey = "\(showsPrevious)|\(previousTitle ?? "")|\(previousText)|\(showsContinuation)|\(continuationTitle ?? "")|\(continuationText)".hashValue
         let displaysTitle = titleMode != 2 || isVolume
         let titlePrefix = displaysTitle && !title.isEmpty ? title + "\n" : ""
-        let styleKey = "\(contentKey)|\(adjacentContentKey)|\(title)|\(isVolume)|\(fontSize)|\(fontPath)|\(fontRevision)|\(letterSpacing)|\(lineSpacing)|\(paragraphSpacing)|\(paragraphIndent)|\(paddingLeft)|\(paddingRight)|\(paddingTop)|\(paddingBottom)|\(headerInset)|\(footerInset)|\(fontWeight)|\(titleMode)|\(titleSize)|\(titleTopSpacing)|\(titleBottomSpacing)|\(underlineMode)|\(isSelectable)|\(fullJustify)|\(effectivePageAnimation)|\(foregroundColor.hash)"
+        let availableWidth = view.bounds.width > 0 ? view.bounds.width : UIScreen.main.bounds.width
+        let contentWidth = max(availableWidth - CGFloat(paddingLeft + paddingRight) - 8, 120)
+        let hasInlineImages = ReaderAttributedContentBuilder.containsImageMarkup(text)
+            || (showsPrevious && ReaderAttributedContentBuilder.containsImageMarkup(previousText))
+            || (showsContinuation && ReaderAttributedContentBuilder.containsImageMarkup(continuationText))
+        let imageWidthKey = hasInlineImages ? "|imgW:\(Int(contentWidth.rounded()))" : ""
+        let styleKey = "\(contentKey)|\(adjacentContentKey)|\(title)|\(isVolume)|\(fontSize)|\(fontPath)|\(fontRevision)|\(letterSpacing)|\(lineSpacing)|\(paragraphSpacing)|\(paragraphIndent)|\(paddingLeft)|\(paddingRight)|\(paddingTop)|\(paddingBottom)|\(headerInset)|\(footerInset)|\(fontWeight)|\(titleMode)|\(titleSize)|\(titleTopSpacing)|\(titleBottomSpacing)|\(underlineMode)|\(isSelectable)|\(fullJustify)|\(effectivePageAnimation)|\(foregroundColor.hash)\(imageWidthKey)"
         if chapterChanged || context.coordinator.styleKey != styleKey {
             if context.coordinator.shouldDeferRender(in: view) {
                 context.coordinator.needsDeferredRender = true
@@ -215,6 +222,7 @@ struct ReaderTextView: UIViewRepresentable {
             context.coordinator.styleKey = styleKey
             let typography = ReaderTypography(configuration: self)
             let bodyAttributes = typography.bodyAttributes
+            let displayScale = view.traitCollection.displayScale > 0 ? view.traitCollection.displayScale : UIScreen.main.scale
             let rendered = NSMutableAttributedString(string: "")
             context.coordinator.previousBodyStart = nil
             context.coordinator.previousBodyEnd = nil
@@ -224,10 +232,15 @@ struct ReaderTextView: UIViewRepresentable {
                 let previousHeading = displaysTitle ? (previousTitle ?? "") + "\n" : ""
                 rendered.append(NSAttributedString(string: previousHeading, attributes: typography.headingAttributes))
                 context.coordinator.previousBodyStart = rendered.length
-                rendered.append(NSAttributedString(
-                    string: previousText.isEmpty ? String(repeating: "\n", count: 80) : previousText,
-                    attributes: bodyAttributes
-                ))
+                if previousText.isEmpty {
+                    rendered.append(NSAttributedString(string: String(repeating: "\n", count: 80), attributes: bodyAttributes))
+                } else {
+                    rendered.append(ReaderAttributedContentBuilder.build(
+                        body: previousText, bodyAttributes: bodyAttributes,
+                        contentWidth: contentWidth, fontSize: CGFloat(fontSize),
+                        displayScale: displayScale, foregroundColor: foregroundColor
+                    ))
+                }
                 context.coordinator.previousBodyEnd = rendered.length
                 rendered.append(NSAttributedString(string: "\n\n", attributes: bodyAttributes))
             }
@@ -236,7 +249,11 @@ struct ReaderTextView: UIViewRepresentable {
                 rendered.append(NSAttributedString(string: titlePrefix, attributes: typography.headingAttributes))
             }
             context.coordinator.renderedPrefixLength = rendered.length
-            rendered.append(NSAttributedString(string: text, attributes: bodyAttributes))
+            rendered.append(ReaderAttributedContentBuilder.build(
+                body: text, bodyAttributes: bodyAttributes,
+                contentWidth: contentWidth, fontSize: CGFloat(fontSize),
+                displayScale: displayScale, foregroundColor: foregroundColor
+            ))
             context.coordinator.currentBodyEnd = rendered.length
             if showsContinuation {
                 rendered.append(NSAttributedString(string: "\n\n", attributes: bodyAttributes))
@@ -244,10 +261,15 @@ struct ReaderTextView: UIViewRepresentable {
                 let continuationHeading = displaysTitle ? (continuationTitle ?? "") + "\n" : ""
                 rendered.append(NSAttributedString(string: continuationHeading, attributes: typography.headingAttributes))
                 context.coordinator.continuationBodyStart = rendered.length
-                rendered.append(NSAttributedString(
-                    string: continuationText.isEmpty ? String(repeating: "\n", count: 80) : continuationText,
-                    attributes: bodyAttributes
-                ))
+                if continuationText.isEmpty {
+                    rendered.append(NSAttributedString(string: String(repeating: "\n", count: 80), attributes: bodyAttributes))
+                } else {
+                    rendered.append(ReaderAttributedContentBuilder.build(
+                        body: continuationText, bodyAttributes: bodyAttributes,
+                        contentWidth: contentWidth, fontSize: CGFloat(fontSize),
+                        displayScale: displayScale, foregroundColor: foregroundColor
+                    ))
+                }
             }
             context.coordinator.isApplyingContent = true
             if primaryContentChanged, effectivePageAnimation != 3 {
@@ -924,6 +946,11 @@ struct ReaderTextView: UIViewRepresentable {
         @objc private func tapped(_ gesture: UITapGestureRecognizer) {
             guard let view = textView, gesture.state == .ended else { return }
             let point = gesture.location(in: view)
+            if let descriptor = interactiveImage(at: point, in: view),
+               let onTapImage = parent.onTapInteractiveImage {
+                onTapImage(descriptor)
+                return
+            }
             // UIScrollView changes its bounds origin as content scrolls, and
             // gesture locations use that content coordinate space. Convert
             // back to viewport coordinates before dividing the visible screen
@@ -946,6 +973,31 @@ struct ReaderTextView: UIViewRepresentable {
             case -1: break
             default: parent.onTapAction(action)
             }
+        }
+
+        private func interactiveImage(at point: CGPoint, in view: UITextView) -> ChapterImageDescriptor? {
+            let manager = view.layoutManager
+            guard manager.numberOfGlyphs > 0 else { return nil }
+            let containerPoint = CGPoint(
+                x: point.x - view.textContainerInset.left,
+                y: point.y - view.textContainerInset.top
+            )
+            var fraction: CGFloat = 0
+            let glyphIndex = manager.glyphIndex(
+                for: containerPoint,
+                in: view.textContainer,
+                fractionOfDistanceThroughGlyph: &fraction
+            )
+            guard glyphIndex < manager.numberOfGlyphs else { return nil }
+            let rect = manager.boundingRect(forGlyphRange: NSRange(location: glyphIndex, length: 1), in: view.textContainer)
+            guard rect.insetBy(dx: -8, dy: -8).contains(containerPoint) else { return nil }
+            let charIndex = manager.characterIndexForGlyph(at: glyphIndex)
+            guard charIndex < view.textStorage.length,
+                  let descriptor = view.textStorage.attribute(.legadoInteractiveImage, at: charIndex, effectiveRange: nil) as? ChapterImageDescriptor,
+                  descriptor.clickJS != nil else {
+                return nil
+            }
+            return descriptor
         }
 
         @objc private func swiped(_ gesture: UISwipeGestureRecognizer) {

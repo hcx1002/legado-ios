@@ -137,17 +137,27 @@ struct ReaderComicView: UIViewRepresentable {
             cell.task = Task { [weak self, weak cell] in
                 do {
                     let data = try await ChapterImageLoader().load(address, source: source, book: book, chapter: chapter)
-                    let image = try await Task.detached(priority: .userInitiated) {
-                        try Task.checkCancellation()
-                        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-                              let decoded = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                    let targetWidth = max(self?.table?.bounds.width ?? UIScreen.main.bounds.width, 320)
+                    let image: UIImage
+                    if let decoded = await Task.detached(priority: .userInitiated, operation: { () -> UIImage? in
+                        guard !Task.isCancelled,
+                              let source = CGImageSourceCreateWithData(data as CFData, nil),
+                              let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                                 kCGImageSourceCreateThumbnailFromImageAlways: true,
                                 kCGImageSourceCreateThumbnailWithTransform: true,
                                 kCGImageSourceThumbnailMaxPixelSize: 4096,
                                 kCGImageSourceShouldCacheImmediately: true
-                              ] as CFDictionary) else { throw ChapterImageError.emptyImage }
-                        return UIImage(cgImage: decoded)
-                    }.value
+                              ] as CFDictionary) else { return nil }
+                        return UIImage(cgImage: cg)
+                    }).value {
+                        image = decoded
+                    } else if let svg = await MainActor.run(body: {
+                        ReaderSVGRenderer.shared.render(svgData: data, targetWidth: targetWidth)
+                    }) {
+                        image = svg
+                    } else {
+                        throw ChapterImageError.emptyImage
+                    }
                     try Task.checkCancellation()
                     guard let self, let cell else { return }
                     guard self.owner.chapter == chapter else { return }

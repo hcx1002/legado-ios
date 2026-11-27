@@ -188,6 +188,710 @@ private struct ReaderCommentsBrowser: UIViewControllerRepresentable {
     }
 }
 
+extension NSAttributedString.Key {
+    static let legadoInteractiveImage = NSAttributedString.Key("legado.interactiveImage")
+}
+
+final class ReaderInlineImageAttachment: NSTextAttachment {
+    let descriptor: ChapterImageDescriptor
+
+    init(descriptor: ChapterImageDescriptor) {
+        self.descriptor = descriptor
+        super.init(data: nil, ofType: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+}
+
+@MainActor
+enum ReaderAttributedContentBuilder {
+    static func containsImageMarkup(_ text: String) -> Bool {
+        text.range(of: "<img", options: .caseInsensitive) != nil
+            || text.range(of: "<mip-img", options: .caseInsensitive) != nil
+    }
+
+    static func build(
+        body: String,
+        bodyAttributes: [NSAttributedString.Key: Any],
+        contentWidth: CGFloat,
+        fontSize: CGFloat,
+        displayScale: CGFloat = UIScreen.main.scale,
+        foregroundColor: UIColor = .label
+    ) -> NSAttributedString {
+        guard containsImageMarkup(body) else {
+            return NSAttributedString(string: body, attributes: bodyAttributes)
+        }
+        let tags = ChapterImageParser().imageTags(in: body)
+        guard !tags.isEmpty else {
+            return NSAttributedString(string: body, attributes: bodyAttributes)
+        }
+
+        let usableWidth = max(contentWidth, 120)
+        let result = NSMutableAttributedString()
+        var cursor = body.startIndex
+
+        for (range, descriptor) in tags {
+            if cursor < range.lowerBound {
+                let textSegment = String(body[cursor..<range.lowerBound])
+                result.append(NSAttributedString(string: textSegment, attributes: bodyAttributes))
+            }
+            if let attachmentString = makeAttachmentString(
+                for: descriptor,
+                bodyAttributes: bodyAttributes,
+                usableWidth: usableWidth,
+                fontSize: fontSize,
+                displayScale: displayScale,
+                foregroundColor: foregroundColor
+            ) {
+                result.append(attachmentString)
+            }
+            cursor = range.upperBound
+        }
+
+        if cursor < body.endIndex {
+            let tail = String(body[cursor...])
+            result.append(NSAttributedString(string: tail, attributes: bodyAttributes))
+        }
+        return result
+    }
+
+    private static func makeAttachmentString(
+        for descriptor: ChapterImageDescriptor,
+        bodyAttributes: [NSAttributedString.Key: Any],
+        usableWidth: CGFloat,
+        fontSize: CGFloat,
+        displayScale: CGFloat,
+        foregroundColor: UIColor
+    ) -> NSAttributedString? {
+        let isInlineTextStyle = descriptor.style?.uppercased() == "TEXT"
+        let inlineTargetHeight: CGFloat? = isInlineTextStyle ? max(fontSize * 1.3, 18) : nil
+
+        let image: UIImage?
+        if let (mime, data) = ChapterImageParser.decodeDataURI(descriptor.rawAddress) {
+            if isSVG(mime: mime, data: data) {
+                image = ReaderSVGRenderer.shared.render(
+                    svgData: data,
+                    targetWidth: usableWidth,
+                    inlineHeight: inlineTargetHeight,
+                    scale: displayScale
+                )
+            } else {
+                image = UIImage(data: data)
+            }
+        } else if descriptor.clickJS != nil {
+            image = makeFallbackBadgeImage(
+                title: "查看评论 〉",
+                width: min(usableWidth, 180),
+                fontSize: max(fontSize * 0.8, 13),
+                foreground: foregroundColor,
+                scale: displayScale
+            )
+        } else {
+            image = nil
+        }
+
+        guard let image, image.size.width > 0, image.size.height > 0 else { return nil }
+        let attachment = ReaderInlineImageAttachment(descriptor: descriptor)
+        attachment.image = image
+
+        let drawSize: CGSize
+        if isInlineTextStyle, let inlineTargetHeight, image.size.width / image.size.height <= 4 {
+            let ratio = image.size.width / image.size.height
+            let h = inlineTargetHeight
+            drawSize = CGSize(width: min(h * ratio, usableWidth), height: h)
+            attachment.bounds = CGRect(x: 0, y: -(h - fontSize) * 0.3, width: drawSize.width, height: drawSize.height)
+        } else {
+            let width = min(image.size.width, usableWidth)
+            let ratio = image.size.height / image.size.width
+            let height = max(width * ratio, 16)
+            drawSize = CGSize(width: width, height: height)
+            attachment.bounds = CGRect(x: 0, y: 0, width: drawSize.width, height: drawSize.height)
+        }
+
+        var attributes: [NSAttributedString.Key: Any] = [
+            .legadoInteractiveImage: descriptor
+        ]
+        if !isInlineTextStyle || drawSize.width > usableWidth * 0.5 {
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.alignment = .center
+            paragraph.firstLineHeadIndent = 0
+            paragraph.headIndent = 0
+            paragraph.paragraphSpacingBefore = 6
+            paragraph.paragraphSpacing = 8
+            paragraph.lineSpacing = 0
+            attributes[.paragraphStyle] = paragraph
+        } else if let font = bodyAttributes[.font] {
+            attributes[.font] = font
+        }
+
+        let output = NSMutableAttributedString(attachment: attachment)
+        output.addAttributes(attributes, range: NSRange(location: 0, length: output.length))
+        return output
+    }
+
+    private static func isSVG(mime: String?, data: Data) -> Bool {
+        if mime?.lowercased().contains("svg") == true { return true }
+        guard let prefix = String(data: data.prefix(256), encoding: .utf8)?.lowercased() else { return false }
+        return prefix.contains("<svg")
+    }
+
+    private static func makeFallbackBadgeImage(
+        title: String,
+        width: CGFloat,
+        fontSize: CGFloat,
+        foreground: UIColor,
+        scale: CGFloat
+    ) -> UIImage {
+        let height = ceil(fontSize * 2.1)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = max(scale, 1)
+        format.opaque = false
+        return UIGraphicsImageRenderer(size: CGSize(width: width, height: height), format: format).image { ctx in
+            let rect = CGRect(x: 1, y: 1, width: width - 2, height: height - 2)
+            let path = UIBezierPath(roundedRect: rect, cornerRadius: height / 2)
+            foreground.withAlphaComponent(0.08).setFill()
+            path.fill()
+            foreground.withAlphaComponent(0.25).setStroke()
+            path.lineWidth = 1
+            path.stroke()
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: fontSize, weight: .medium),
+                .foregroundColor: foreground.withAlphaComponent(0.85)
+            ]
+            let text = title as NSString
+            let size = text.size(withAttributes: attrs)
+            text.draw(at: CGPoint(x: (width - size.width) / 2, y: (height - size.height) / 2), withAttributes: attrs)
+        }
+    }
+}
+
+/// Fast, synchronous native SVG vector renderer for inline comment cards and badges.
+@MainActor
+final class ReaderSVGRenderer {
+    static let shared = ReaderSVGRenderer()
+    private let cache = NSCache<NSString, UIImage>()
+
+    private init() {
+        cache.countLimit = 120
+    }
+
+    func render(svgData: Data, targetWidth: CGFloat, inlineHeight: CGFloat? = nil, scale: CGFloat = UIScreen.main.scale) -> UIImage? {
+        guard !svgData.isEmpty else { return nil }
+        let key = "\(svgData.hashValue)|\(Int(targetWidth.rounded()))|\(Int((inlineHeight ?? 0).rounded()))|\(Int(scale.rounded()))" as NSString
+        if let cached = cache.object(forKey: key) { return cached }
+
+        let parser = SVGDocumentParser()
+        guard let doc = parser.parse(data: svgData), doc.viewBox.width > 0, doc.viewBox.height > 0 else {
+            return nil
+        }
+
+        let vb = doc.viewBox
+        let outSize: CGSize
+        if let inlineHeight, vb.width / vb.height <= 4 {
+            let ratio = vb.width / vb.height
+            let h = inlineHeight
+            outSize = CGSize(width: min(max(h * ratio, 12), targetWidth), height: max(h, 12))
+        } else {
+            let maxW = max(targetWidth, 60)
+            let desiredW = vb.width >= 240 ? maxW : min(vb.width, maxW)
+            let ratio = vb.height / vb.width
+            outSize = CGSize(width: desiredW, height: max(desiredW * ratio, 16))
+        }
+
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = max(scale, 1)
+        format.opaque = false
+        let image = UIGraphicsImageRenderer(size: outSize, format: format).image { rendererContext in
+            let cg = rendererContext.cgContext
+            cg.saveGState()
+            cg.scaleBy(x: outSize.width / vb.width, y: outSize.height / vb.height)
+            cg.translateBy(x: -vb.minX, y: -vb.minY)
+            for node in doc.nodes {
+                draw(node: node, in: cg, viewBox: vb)
+            }
+            cg.restoreGState()
+        }
+        cache.setObject(image, forKey: key)
+        return image
+    }
+
+    private func draw(node: SVGNode, in cg: CGContext, viewBox: CGRect) {
+        cg.saveGState()
+        if node.style.opacity < 1 {
+            cg.setAlpha(CGFloat(max(0, min(node.style.opacity, 1))))
+        }
+        if node.translate != .zero {
+            cg.translateBy(x: node.translate.x, y: node.translate.y)
+        }
+        switch node.kind {
+        case .rect(let x, let y, let w, let h, let rx, let ry):
+            let rect = CGRect(x: x, y: y, width: w, height: h)
+            let radius = min(max(rx, ry), min(w, h) / 2)
+            let path = radius > 0 ? UIBezierPath(roundedRect: rect, cornerRadius: radius) : UIBezierPath(rect: rect)
+            fillAndStroke(path: path, style: node.style, in: cg)
+        case .circle(let cx, let cy, let r):
+            let path = UIBezierPath(ovalIn: CGRect(x: cx - r, y: cy - r, width: r * 2, height: r * 2))
+            fillAndStroke(path: path, style: node.style, in: cg)
+        case .ellipse(let cx, let cy, let rx, let ry):
+            let path = UIBezierPath(ovalIn: CGRect(x: cx - rx, y: cy - ry, width: rx * 2, height: ry * 2))
+            fillAndStroke(path: path, style: node.style, in: cg)
+        case .line(let x1, let y1, let x2, let y2):
+            let path = UIBezierPath()
+            path.move(to: CGPoint(x: x1, y: y1))
+            path.addLine(to: CGPoint(x: x2, y: y2))
+            fillAndStroke(path: path, style: node.style, in: cg)
+        case .polygon(let points, let closed):
+            guard let first = points.first else { break }
+            let path = UIBezierPath()
+            path.move(to: first)
+            for pt in points.dropFirst() { path.addLine(to: pt) }
+            if closed { path.close() }
+            fillAndStroke(path: path, style: node.style, in: cg)
+        case .path(let d):
+            if let path = SVGPathBuilder.build(d) {
+                fillAndStroke(path: path, style: node.style, in: cg)
+            }
+        case .text(let x, let y, let content):
+            let trimmed = content.replacingOccurrences(of: "\n", with: " ")
+            guard !trimmed.isEmpty else { break }
+            let fontSize = max(node.style.fontSize, 8)
+            let font = UIFont.systemFont(ofSize: fontSize, weight: node.style.isBold ? .bold : .regular)
+            let fillColor = (node.style.fill ?? .black).withAlphaComponent(node.style.fillAlpha)
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: font,
+                .foregroundColor: fillColor
+            ]
+            let nsText = trimmed as NSString
+            let textSize = nsText.size(withAttributes: attrs)
+            let drawX: CGFloat
+            switch node.style.textAnchor {
+            case "middle": drawX = x - textSize.width / 2
+            case "end": drawX = x - textSize.width
+            default: drawX = x
+            }
+            let drawY: CGFloat
+            if node.style.dominantBaseline == "middle" || node.style.dominantBaseline == "central" {
+                drawY = y - textSize.height / 2
+            } else {
+                drawY = y - font.ascender
+            }
+            UIGraphicsPushContext(cg)
+            nsText.draw(at: CGPoint(x: drawX, y: drawY), withAttributes: attrs)
+            UIGraphicsPopContext()
+        }
+        cg.restoreGState()
+    }
+
+    private func fillAndStroke(path: UIBezierPath, style: SVGStyle, in cg: CGContext) {
+        if let fill = style.fill {
+            cg.addPath(path.cgPath)
+            cg.setFillColor(fill.withAlphaComponent(style.fillAlpha).cgColor)
+            cg.fillPath()
+        }
+        if let stroke = style.stroke, style.strokeWidth > 0 {
+            cg.addPath(path.cgPath)
+            cg.setStrokeColor(stroke.withAlphaComponent(style.strokeAlpha).cgColor)
+            cg.setLineWidth(style.strokeWidth)
+            cg.strokePath()
+        }
+    }
+}
+
+private struct SVGStyle {
+    var fill: UIColor? = .black
+    var fillExplicit = false
+    var fillOpacity: CGFloat = 1
+    var stroke: UIColor? = nil
+    var strokeWidth: CGFloat = 1
+    var strokeOpacity: CGFloat = 1
+    var opacity: CGFloat = 1
+    var fontSize: CGFloat = 16
+    var isBold = false
+    var textAnchor = "start"
+    var dominantBaseline = "auto"
+
+    var fillAlpha: CGFloat {
+        guard let fill else { return 0 }
+        var a: CGFloat = 1
+        fill.getRed(nil, green: nil, blue: nil, alpha: &a)
+        return a * fillOpacity
+    }
+
+    var strokeAlpha: CGFloat {
+        guard let stroke else { return 0 }
+        var a: CGFloat = 1
+        stroke.getRed(nil, green: nil, blue: nil, alpha: &a)
+        return a * strokeOpacity
+    }
+}
+
+private struct SVGNode {
+    enum Kind {
+        case rect(x: CGFloat, y: CGFloat, w: CGFloat, h: CGFloat, rx: CGFloat, ry: CGFloat)
+        case circle(cx: CGFloat, cy: CGFloat, r: CGFloat)
+        case ellipse(cx: CGFloat, cy: CGFloat, rx: CGFloat, ry: CGFloat)
+        case line(x1: CGFloat, y1: CGFloat, x2: CGFloat, y2: CGFloat)
+        case polygon(points: [CGPoint], closed: Bool)
+        case path(d: String)
+        case text(x: CGFloat, y: CGFloat, content: String)
+    }
+
+    let kind: Kind
+    let style: SVGStyle
+    let translate: CGPoint
+}
+
+private struct SVGDocument {
+    let viewBox: CGRect
+    let nodes: [SVGNode]
+}
+
+private final class SVGDocumentParser: NSObject, XMLParserDelegate {
+    private var viewBox = CGRect.zero
+    private var nodes: [SVGNode] = []
+    private var styleStack: [SVGStyle] = [SVGStyle()]
+    private var translateStack: [CGPoint] = [.zero]
+
+    private var activeText: (x: CGFloat, y: CGFloat, style: SVGStyle, translate: CGPoint, buffer: String)?
+
+    func parse(data: Data) -> SVGDocument? {
+        let parser = XMLParser(data: data)
+        parser.delegate = self
+        guard parser.parse() else { return nil }
+        if viewBox.width <= 0 || viewBox.height <= 0 {
+            viewBox = CGRect(x: 0, y: 0, width: 300, height: 150)
+        }
+        return SVGDocument(viewBox: viewBox, nodes: nodes)
+    }
+
+    func parser(
+        _ parser: XMLParser,
+        didStartElement elementName: String,
+        namespaceURI: String?,
+        qualifiedName qName: String?,
+        attributes attributeDict: [String: String]
+    ) {
+        let tag = elementName.lowercased()
+        let attrs = mergedAttributes(attributeDict)
+        let parentStyle = styleStack.last ?? SVGStyle()
+        let style = applying(attrs: attrs, to: parentStyle, isLine: tag == "line")
+        let parentTranslate = translateStack.last ?? .zero
+        let localTranslate = parseTranslate(attrs["transform"])
+        let combinedTranslate = CGPoint(x: parentTranslate.x + localTranslate.x, y: parentTranslate.y + localTranslate.y)
+
+        styleStack.append(style)
+        translateStack.append(combinedTranslate)
+
+        switch tag {
+        case "svg":
+            if let vb = attrs["viewbox"] ?? attrs["viewBox"] {
+                let nums = parseNumbers(vb)
+                if nums.count == 4, nums[2] > 0, nums[3] > 0 {
+                    viewBox = CGRect(x: nums[0], y: nums[1], width: nums[2], height: nums[3])
+                }
+            }
+            if viewBox.width <= 0 || viewBox.height <= 0 {
+                let w = parseLength(attrs["width"], reference: 300) ?? 300
+                let h = parseLength(attrs["height"], reference: 150) ?? 150
+                viewBox = CGRect(x: 0, y: 0, width: w, height: h)
+            }
+        case "rect":
+            let x = parseLength(attrs["x"], reference: viewBox.width) ?? 0
+            let y = parseLength(attrs["y"], reference: viewBox.height) ?? 0
+            let w = parseLength(attrs["width"], reference: viewBox.width) ?? 0
+            let h = parseLength(attrs["height"], reference: viewBox.height) ?? 0
+            let rx = parseLength(attrs["rx"], reference: viewBox.width) ?? 0
+            let ry = parseLength(attrs["ry"], reference: viewBox.height) ?? rx
+            if w > 0, h > 0 {
+                nodes.append(.init(kind: .rect(x: x, y: y, w: w, h: h, rx: rx, ry: ry), style: style, translate: combinedTranslate))
+            }
+        case "circle":
+            let cx = parseLength(attrs["cx"], reference: viewBox.width) ?? 0
+            let cy = parseLength(attrs["cy"], reference: viewBox.height) ?? 0
+            let r = parseLength(attrs["r"], reference: min(viewBox.width, viewBox.height)) ?? 0
+            if r > 0 {
+                nodes.append(.init(kind: .circle(cx: cx, cy: cy, r: r), style: style, translate: combinedTranslate))
+            }
+        case "ellipse":
+            let cx = parseLength(attrs["cx"], reference: viewBox.width) ?? 0
+            let cy = parseLength(attrs["cy"], reference: viewBox.height) ?? 0
+            let rx = parseLength(attrs["rx"], reference: viewBox.width) ?? 0
+            let ry = parseLength(attrs["ry"], reference: viewBox.height) ?? 0
+            if rx > 0, ry > 0 {
+                nodes.append(.init(kind: .ellipse(cx: cx, cy: cy, rx: rx, ry: ry), style: style, translate: combinedTranslate))
+            }
+        case "line":
+            let x1 = parseLength(attrs["x1"], reference: viewBox.width) ?? 0
+            let y1 = parseLength(attrs["y1"], reference: viewBox.height) ?? 0
+            let x2 = parseLength(attrs["x2"], reference: viewBox.width) ?? 0
+            let y2 = parseLength(attrs["y2"], reference: viewBox.height) ?? 0
+            nodes.append(.init(kind: .line(x1: x1, y1: y1, x2: x2, y2: y2), style: style, translate: combinedTranslate))
+        case "polygon", "polyline":
+            let nums = parseNumbers(attrs["points"] ?? "")
+            var pts: [CGPoint] = []
+            var idx = 0
+            while idx + 1 < nums.count {
+                pts.append(CGPoint(x: nums[idx], y: nums[idx + 1]))
+                idx += 2
+            }
+            if !pts.isEmpty {
+                nodes.append(.init(kind: .polygon(points: pts, closed: tag == "polygon"), style: style, translate: combinedTranslate))
+            }
+        case "path":
+            if let d = attrs["d"], !d.isEmpty {
+                nodes.append(.init(kind: .path(d: d), style: style, translate: combinedTranslate))
+            }
+        case "text":
+            let x = parseLength(attrs["x"], reference: viewBox.width) ?? 0
+            let y = parseLength(attrs["y"], reference: viewBox.height) ?? 0
+            activeText = (x, y, style, combinedTranslate, "")
+        case "tspan":
+            if var current = activeText {
+                if !current.buffer.isEmpty {
+                    nodes.append(.init(kind: .text(x: current.x, y: current.y, content: current.buffer), style: current.style, translate: current.translate))
+                    current.buffer = ""
+                }
+                if let x = parseLength(attrs["x"], reference: viewBox.width) { current.x = x }
+                if let y = parseLength(attrs["y"], reference: viewBox.height) { current.y = y }
+                if let dx = parseLength(attrs["dx"], reference: viewBox.width) { current.x += dx }
+                if let dy = parseLength(attrs["dy"], reference: viewBox.height) { current.y += dy }
+                current.style = style
+                activeText = current
+            }
+        default:
+            break
+        }
+    }
+
+    func parser(_ parser: XMLParser, foundCharacters string: String) {
+        if var current = activeText {
+            current.buffer += string
+            activeText = current
+        }
+    }
+
+    func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
+        let tag = elementName.lowercased()
+        if tag == "text", let current = activeText {
+            if !current.buffer.isEmpty {
+                nodes.append(.init(kind: .text(x: current.x, y: current.y, content: current.buffer), style: current.style, translate: current.translate))
+            }
+            activeText = nil
+        }
+        if styleStack.count > 1 { styleStack.removeLast() }
+        if translateStack.count > 1 { translateStack.removeLast() }
+    }
+
+    private func mergedAttributes(_ raw: [String: String]) -> [String: String] {
+        var result: [String: String] = [:]
+        for (k, v) in raw { result[k.lowercased()] = v }
+        if let inline = result["style"] {
+            for part in inline.split(separator: ";") {
+                let pair = part.split(separator: ":", maxSplits: 1)
+                if pair.count == 2 {
+                    let key = pair[0].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                    let val = pair[1].trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !key.isEmpty { result[key] = val }
+                }
+            }
+        }
+        return result
+    }
+
+    private func applying(attrs: [String: String], to base: SVGStyle, isLine: Bool) -> SVGStyle {
+        var style = base
+        if isLine, !style.fillExplicit { style.fill = nil }
+        if let fill = attrs["fill"] {
+            style.fill = parseColor(fill)
+            style.fillExplicit = true
+        }
+        if let fo = attrs["fill-opacity"], let v = Double(fo.trimmingCharacters(in: .whitespaces)) {
+            style.fillOpacity = CGFloat(v)
+        }
+        if let stroke = attrs["stroke"] {
+            style.stroke = parseColor(stroke)
+        }
+        if let sw = attrs["stroke-width"], let v = parseLength(sw, reference: 1) {
+            style.strokeWidth = v
+        }
+        if let so = attrs["stroke-opacity"], let v = Double(so.trimmingCharacters(in: .whitespaces)) {
+            style.strokeOpacity = CGFloat(v)
+        }
+        if let op = attrs["opacity"], let v = Double(op.trimmingCharacters(in: .whitespaces)) {
+            style.opacity *= CGFloat(v)
+        }
+        if let fs = attrs["font-size"], let v = parseLength(fs, reference: 16) {
+            style.fontSize = v
+        }
+        if let fw = attrs["font-weight"]?.lowercased() {
+            if fw == "bold" || fw == "bolder" { style.isBold = true }
+            else if fw == "normal" { style.isBold = false }
+            else if let n = Int(fw) { style.isBold = n >= 600 }
+        }
+        if let anchor = attrs["text-anchor"]?.lowercased() {
+            style.textAnchor = anchor
+        }
+        if let baseline = attrs["dominant-baseline"]?.lowercased() {
+            style.dominantBaseline = baseline
+        }
+        return style
+    }
+
+    private func parseLength(_ raw: String?, reference: CGFloat) -> CGFloat? {
+        guard var s = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !s.isEmpty else { return nil }
+        if s.hasSuffix("%") {
+            s.removeLast()
+            return Double(s).map { CGFloat($0) / 100 * reference }
+        }
+        for suffix in ["px", "pt", "em", "rem"] where s.lowercased().hasSuffix(suffix) {
+            s = String(s.dropLast(suffix.count))
+            break
+        }
+        return Double(s).map { CGFloat($0) }
+    }
+
+    private func parseNumbers(_ raw: String) -> [CGFloat] {
+        guard let regex = try? NSRegularExpression(pattern: #"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?"#) else { return [] }
+        return regex.matches(in: raw, range: NSRange(raw.startIndex..., in: raw)).compactMap { match in
+            guard let range = Range(match.range, in: raw), let val = Double(raw[range]) else { return nil }
+            return CGFloat(val)
+        }
+    }
+
+    private func parseTranslate(_ transform: String?) -> CGPoint {
+        guard let transform,
+              let range = transform.range(of: #"translate\s*\(([^)]+)\)"#, options: .regularExpression) else { return .zero }
+        let nums = parseNumbers(String(transform[range]))
+        if nums.count >= 2 { return CGPoint(x: nums[0], y: nums[1]) }
+        if nums.count == 1 { return CGPoint(x: nums[0], y: 0) }
+        return .zero
+    }
+
+    private func parseColor(_ raw: String) -> UIColor? {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if s.isEmpty || s == "none" || s == "transparent" { return nil }
+        if s.hasPrefix("#") {
+            let hex = String(s.dropFirst())
+            var value: UInt64 = 0
+            guard Scanner(string: hex).scanHexInt64(&value) else { return nil }
+            switch hex.count {
+            case 3:
+                let r = CGFloat((value >> 8) & 0xF) / 15
+                let g = CGFloat((value >> 4) & 0xF) / 15
+                let b = CGFloat(value & 0xF) / 15
+                return UIColor(red: r, green: g, blue: b, alpha: 1)
+            case 6:
+                let r = CGFloat((value >> 16) & 0xFF) / 255
+                let g = CGFloat((value >> 8) & 0xFF) / 255
+                let b = CGFloat(value & 0xFF) / 255
+                return UIColor(red: r, green: g, blue: b, alpha: 1)
+            case 8:
+                let r = CGFloat((value >> 24) & 0xFF) / 255
+                let g = CGFloat((value >> 16) & 0xFF) / 255
+                let b = CGFloat((value >> 8) & 0xFF) / 255
+                let a = CGFloat(value & 0xFF) / 255
+                return UIColor(red: r, green: g, blue: b, alpha: a)
+            default:
+                return nil
+            }
+        }
+        if s.hasPrefix("rgba(") || s.hasPrefix("rgb(") {
+            let nums = parseNumbers(s)
+            guard nums.count >= 3 else { return nil }
+            let a = nums.count >= 4 ? nums[3] : 1
+            return UIColor(red: nums[0] / 255, green: nums[1] / 255, blue: nums[2] / 255, alpha: a)
+        }
+        switch s {
+        case "white": return .white
+        case "black": return .black
+        case "red": return .systemRed
+        case "gray", "grey": return .systemGray
+        case "blue": return .systemBlue
+        case "green": return .systemGreen
+        case "orange": return .systemOrange
+        case "yellow": return .systemYellow
+        case "pink": return .systemPink
+        case "purple": return .systemPurple
+        default: return nil
+        }
+    }
+}
+
+private enum SVGPathBuilder {
+    static func build(_ d: String) -> UIBezierPath? {
+        guard let regex = try? NSRegularExpression(pattern: #"[MmLlHhVvQqCcZz]|[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?"#) else { return nil }
+        let tokens = regex.matches(in: d, range: NSRange(d.startIndex..., in: d)).compactMap {
+            Range($0.range, in: d).map { String(d[$0]) }
+        }
+        guard !tokens.isEmpty else { return nil }
+        let path = UIBezierPath()
+        var current = CGPoint.zero
+        var start = CGPoint.zero
+        var command: Character = "M"
+        var index = 0
+
+        func nextNum() -> CGFloat? {
+            guard index < tokens.count, let v = Double(tokens[index]) else { return nil }
+            index += 1
+            return CGFloat(v)
+        }
+
+        while index < tokens.count {
+            let token = tokens[index]
+            if token.count == 1, let ch = token.first, ch.isLetter {
+                command = ch
+                index += 1
+                if command == "Z" || command == "z" {
+                    path.close()
+                    current = start
+                    continue
+                }
+            }
+            switch command {
+            case "M", "m":
+                guard let x = nextNum(), let y = nextNum() else { index += 1; continue }
+                let pt = command == "m" ? CGPoint(x: current.x + x, y: current.y + y) : CGPoint(x: x, y: y)
+                path.move(to: pt)
+                current = pt
+                start = pt
+                command = command == "m" ? "l" : "L"
+            case "L", "l":
+                guard let x = nextNum(), let y = nextNum() else { index += 1; continue }
+                let pt = command == "l" ? CGPoint(x: current.x + x, y: current.y + y) : CGPoint(x: x, y: y)
+                path.addLine(to: pt)
+                current = pt
+            case "H", "h":
+                guard let x = nextNum() else { index += 1; continue }
+                let pt = CGPoint(x: command == "h" ? current.x + x : x, y: current.y)
+                path.addLine(to: pt)
+                current = pt
+            case "V", "v":
+                guard let y = nextNum() else { index += 1; continue }
+                let pt = CGPoint(x: current.x, y: command == "v" ? current.y + y : y)
+                path.addLine(to: pt)
+                current = pt
+            case "Q", "q":
+                guard let cx = nextNum(), let cy = nextNum(), let x = nextNum(), let y = nextNum() else { index += 1; continue }
+                let ctrl = command == "q" ? CGPoint(x: current.x + cx, y: current.y + cy) : CGPoint(x: cx, y: cy)
+                let pt = command == "q" ? CGPoint(x: current.x + x, y: current.y + y) : CGPoint(x: x, y: y)
+                path.addQuadCurve(to: pt, controlPoint: ctrl)
+                current = pt
+            case "C", "c":
+                guard let c1x = nextNum(), let c1y = nextNum(), let c2x = nextNum(), let c2y = nextNum(), let x = nextNum(), let y = nextNum() else { index += 1; continue }
+                let c1 = command == "c" ? CGPoint(x: current.x + c1x, y: current.y + c1y) : CGPoint(x: c1x, y: c1y)
+                let c2 = command == "c" ? CGPoint(x: current.x + c2x, y: current.y + c2y) : CGPoint(x: c2x, y: c2y)
+                let pt = command == "c" ? CGPoint(x: current.x + x, y: current.y + y) : CGPoint(x: x, y: y)
+                path.addCurve(to: pt, controlPoint1: c1, controlPoint2: c2)
+                current = pt
+            default:
+                index += 1
+            }
+        }
+        return path
+    }
+}
+
 struct ReaderInteractivePopEnabler: UIViewControllerRepresentable {
     func makeUIViewController(context: Context) -> Controller {
         Controller()

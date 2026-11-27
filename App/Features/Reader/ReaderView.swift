@@ -52,6 +52,8 @@ struct ReaderView: View {
     @State private var readerRenderRevision = 0
     @State private var isWaitingForNextChapter = false
     @State private var isWaitingForPreviousChapter = false
+    @State private var runningInteractiveImageJS = false
+    @State private var interactiveImageError: String?
     @State private var httpTTSEngines: [HttpTTS] = []
     @State private var resumesSpeechAfterChapterLoad = false
     @State private var speechTimerTask: Task<Void, Never>?
@@ -325,6 +327,18 @@ struct ReaderView: View {
         }
         .sheet(item: $illustrationChapter) { chapter in
             EPUBIllustrationsView(book: book, chapter: chapter)
+        }
+        .alert("评论加载提示", isPresented: Binding(
+            get: { interactiveImageError != nil },
+            set: { if !$0 { interactiveImageError = nil } }
+        )) {
+            Button("复制错误信息") {
+                if let err = interactiveImageError { UIPasteboard.general.string = err }
+                interactiveImageError = nil
+            }
+            Button("确定", role: .cancel) { interactiveImageError = nil }
+        } message: {
+            Text(interactiveImageError ?? "")
         }
         .sheet(item: $sourceSwitchBook) { currentBook in
             ReadingNavigationStack {
@@ -600,6 +614,43 @@ struct ReaderView: View {
         chapterCommentsTarget = target
     }
 
+    private func handleInteractiveImageTap(_ descriptor: ChapterImageDescriptor) {
+        guard let rawClickJS = descriptor.clickJS, !rawClickJS.isEmpty, !runningInteractiveImageJS else { return }
+        guard let chapter = model.currentChapter else { return }
+        // Repair &para= corrupted to ¶= in chapters cached before the HTML5 attribute-entity fix.
+        let clickJS = rawClickJS.replacingOccurrences(of: "¶=", with: "&para=")
+        showsReaderMenu = false
+        runningInteractiveImageJS = true
+        AppJavaScriptUIBridge.shared.preferHalfSheetForNextBrowser()
+        let source = model.imageSource
+        let currentBook = model.book
+        let rawAddress = descriptor.rawAddress
+        Task {
+            defer { Task { @MainActor in runningInteractiveImageJS = false } }
+            do {
+                var variables = (currentBook.variable.flatMap { try? JSONDecoder().decode([String: String].self, from: Data($0.utf8)) }) ?? [:]
+                let chapterVars = (chapter.variable.flatMap { try? JSONDecoder().decode([String: String].self, from: Data($0.utf8)) }) ?? [:]
+                variables.merge(chapterVars) { _, local in local }
+                let baseURL = chapter.baseUrl.isEmpty ? chapter.url : chapter.baseUrl
+                _ = try await JavaScriptRuleEvaluator().evaluateAsync(
+                    script: clickJS,
+                    result: .string(rawAddress),
+                    executionContext: .init(
+                        variables: variables,
+                        baseURL: baseURL,
+                        source: source,
+                        book: currentBook,
+                        chapter: chapter
+                    )
+                )
+            } catch {
+                await MainActor.run {
+                    interactiveImageError = "打开评论失败：\(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
     @ViewBuilder private var readerFooter: some View {
         if pageAnimation != 3, model.commentsTarget(at: model.currentIndex) != nil {
             // A changing footer height would repaginate the text precisely when the last page appears.
@@ -786,7 +837,8 @@ struct ReaderView: View {
             onTapAction: handleTapAction,
             holdsDisplayedPage: waitingForChapter,
             chapterGeneration: model.displayedChapterGeneration,
-            pageTurnRequest: volumePageTurnRequest
+            pageTurnRequest: volumePageTurnRequest,
+            onTapInteractiveImage: handleInteractiveImageTap
         )
     }
 
